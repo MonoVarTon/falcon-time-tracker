@@ -6,11 +6,15 @@ from app import db
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
-def test_tests_never_use_working_database() -> None:
-    """Подключение приложения в тестах указывает на временный файл, а не на timetracker.db."""
-    assert "timetracker.db" not in str(db.engine.url)
+def test_tests_use_database_outside_project_folder() -> None:
+    """В тестах приложение подключено к временному файлу вне папки проекта.
 
+    Раньше здесь была проверка «в папке проекта нет файла базы». Она была
+    неверной: при обычном запуске приложение и должно создать timetracker.db
+    в папке проекта. Проверка упала на настоящей базе владельца — удаление
+    по её «совету» уничтожило бы данные (см. docs/ai-log.md).
+    """
+    database_file = Path(db.engine.url.database).resolve()
 
-def test_working_database_file_is_not_created_by_tests() -> None:
-    """Файл рабочей базы в папке проекта не появляется от запуска тестов."""
-    assert not (PROJECT_DIR / "timetracker.db").exists()
+    assert database_file.name != "timetracker.db"
+    assert PROJECT_DIR not in database_file.parents

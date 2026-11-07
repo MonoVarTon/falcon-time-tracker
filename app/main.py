@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import services
 from app.db import engine, get_db, init_db
-from app.schemas import EmployeeCreate, EmployeeOut, EntryOut, ReportOut, TimerStart
+from app.schemas import EmployeeCreate, EmployeeOut, EntryOut, ReportOut, TimerStart, TimerSwitch
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -40,6 +40,11 @@ def get_now() -> datetime:
 @app.exception_handler(services.EmployeeNotFound)
 async def _not_found(_request: Request, error: services.EmployeeNotFound) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(error)})
+
+
+@app.exception_handler(services.MissingDescription)
+async def _missing_description(_request: Request, error: services.MissingDescription) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(error)})
 
 
 @app.exception_handler(services.TimerAlreadyRunning)
@@ -73,8 +78,17 @@ def employees(db: Session = Depends(get_db), now: datetime = Depends(get_now)) -
 def start_timer(
     employee_id: int, body: TimerStart, db: Session = Depends(get_db), now: datetime = Depends(get_now)
 ) -> EntryOut:
-    """Запустить таймер с описанием задачи."""
-    entry = services.start_timer(db, employee_id, body.description, now)
+    """Запустить таймер: работа с задачей, перерыв или обед."""
+    entry = services.start_timer(db, employee_id, body.description, now, kind=body.kind)
+    return services.entry_out(entry, now)
+
+
+@app.post("/api/employees/{employee_id}/timer/switch", status_code=201, response_model=EntryOut)
+def switch_timer(
+    employee_id: int, body: TimerSwitch, db: Session = Depends(get_db), now: datetime = Depends(get_now)
+) -> EntryOut:
+    """Перерыв, обед или «вернуться к работе» — одним нажатием, без разрыва во времени."""
+    entry = services.switch_timer(db, employee_id, body.kind, body.description, now)
     return services.entry_out(entry, now)
 
 

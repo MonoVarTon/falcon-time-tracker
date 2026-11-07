@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import Employee, TimeEntry
+from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, Employee, TimeEntry
 from app.schemas import EmployeeReport, EntryOut, ReportOut
 
 
@@ -24,6 +24,14 @@ class TimerAlreadyRunning(Exception):
 
 class NoRunningTimer(Exception):
     """Останавливать нечего: таймер не запущен."""
+
+
+class MissingDescription(Exception):
+    """Вернуться к работе нельзя: нет ни новой задачи, ни прошлой."""
+
+
+# Описания по умолчанию: у перерыва и обеда задачу вписывать не нужно.
+DEFAULT_DESCRIPTIONS = {KIND_BREAK: "Перерыв", KIND_LUNCH: "Обед"}
 
 
 def create_employee(db: Session, name: str) -> Employee:
@@ -53,7 +61,36 @@ def _require_employee(db: Session, employee_id: int) -> Employee:
     return employee
 
 
-def start_timer(db: Session, employee_id: int, description: str, now: datetime) -> TimeEntry:
+def _description_for(db: Session, employee_id: int, kind: str, description: str | None) -> str:
+    """Описание записи: введённое, стандартное для перерыва/обеда или прошлая задача."""
+    if description is not None:
+        return description
+    if kind in DEFAULT_DESCRIPTIONS:
+        return DEFAULT_DESCRIPTIONS[kind]
+    last_work = db.scalars(
+        select(TimeEntry)
+        .where(TimeEntry.employee_id == employee_id, TimeEntry.kind == KIND_WORK)
+        .order_by(TimeEntry.started_at.desc())
+    ).first()
+    if last_work is None:
+        raise MissingDescription("Укажите задачу: прошлой работы, чтобы её продолжить, нет")
+    return last_work.description
+
+
+def _save_new_entry(db: Session, entry: TimeEntry) -> TimeEntry:
+    """Сохраняет новую запись; гонку двух одновременных запросов ловит индекс базы."""
+    db.add(entry)
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise TimerAlreadyRunning("Таймер уже запущен — сначала остановите его") from error
+    return entry
+
+
+def start_timer(
+    db: Session, employee_id: int, description: str | None, now: datetime, kind: str = KIND_WORK
+) -> TimeEntry:
     """Запускает таймер. Второй одновременный таймер у сотрудника запрещён.
 
     Проверка двойная: сначала спрашиваем базу, есть ли идущий таймер, —
@@ -63,14 +100,30 @@ def start_timer(db: Session, employee_id: int, description: str, now: datetime) 
     _require_employee(db, employee_id)
     if get_running_entry(db, employee_id) is not None:
         raise TimerAlreadyRunning("Таймер уже запущен — сначала остановите его")
-    entry = TimeEntry(employee_id=employee_id, description=description, started_at=now)
-    db.add(entry)
-    try:
-        db.commit()
-    except IntegrityError as error:
-        db.rollback()
-        raise TimerAlreadyRunning("Таймер уже запущен — сначала остановите его") from error
-    return entry
+    text = _description_for(db, employee_id, kind, description)
+    return _save_new_entry(db, TimeEntry(employee_id=employee_id, kind=kind, description=text, started_at=now))
+
+
+def switch_timer(
+    db: Session, employee_id: int, kind: str, description: str | None, now: datetime
+) -> TimeEntry:
+    """Одним действием закрывает текущую запись и открывает новую.
+
+    Так работают кнопки «Перерыв», «Обед» и «Вернуться к работе»: между
+    записями нет ни секунды разрыва, и сотруднику не нужно жать два раза.
+    Если ничего не идёт — просто запускает новую запись.
+    """
+    _require_employee(db, employee_id)
+    text = _description_for(db, employee_id, kind, description)
+    running = get_running_entry(db, employee_id)
+    if running is not None:
+        running.ended_at = max(now, running.started_at)
+        # Закрытие записываем в базу явно и до новой записи. SQLAlchemy и сам
+        # пишет UPDATE раньше INSERT (проверено логом запросов), но мы не хотим
+        # зависеть от его внутреннего порядка: иначе уникальный индекс
+        # «один идущий таймер» увидел бы две открытые записи сразу.
+        db.flush()
+    return _save_new_entry(db, TimeEntry(employee_id=employee_id, kind=kind, description=text, started_at=now))
 
 
 def stop_timer(db: Session, employee_id: int, now: datetime) -> TimeEntry:
@@ -98,6 +151,7 @@ def entry_out(entry: TimeEntry, now: datetime) -> EntryOut:
         description=entry.description,
         started_at=entry.started_at,
         ended_at=entry.ended_at,
+        kind=entry.kind,
         is_running=entry.ended_at is None,
         duration_seconds=_seconds_between(entry.started_at, end),
     )
@@ -111,6 +165,7 @@ def build_report(db: Session, start: datetime, end: datetime, now: datetime) -> 
     - считается только часть внутри периода (работа 23:00–01:00 в отчёте
       за один день даёт свой час);
     - идущий таймер считается до текущего момента;
+    - работа, перерывы и обед считаются отдельно: total_seconds — только работа;
     - сотрудники без записей тоже показываются — с нулём.
     """
     entries = db.scalars(
@@ -125,15 +180,24 @@ def build_report(db: Session, start: datetime, end: datetime, now: datetime) -> 
     rows: list[EmployeeReport] = []
     for employee in list_employees(db):
         own = [e for e in entries if e.employee_id == employee.id]
-        total = 0
+        by_kind = {KIND_WORK: 0, KIND_BREAK: 0, KIND_LUNCH: 0}
         for entry in own:
             entry_end = entry.ended_at if entry.ended_at is not None else now
-            total += _seconds_between(max(entry.started_at, start), min(entry_end, end))
+            by_kind[entry.kind] += _seconds_between(max(entry.started_at, start), min(entry_end, end))
         rows.append(EmployeeReport(
             employee_id=employee.id,
             name=employee.name,
-            total_seconds=total,
+            total_seconds=by_kind[KIND_WORK],
+            break_seconds=by_kind[KIND_BREAK],
+            lunch_seconds=by_kind[KIND_LUNCH],
             entries=[entry_out(e, now) for e in own],
         ))
 
-    return ReportOut(start=start, end=end, total_seconds=sum(r.total_seconds for r in rows), employees=rows)
+    return ReportOut(
+        start=start,
+        end=end,
+        total_seconds=sum(r.total_seconds for r in rows),
+        break_seconds=sum(r.break_seconds for r in rows),
+        lunch_seconds=sum(r.lunch_seconds for r in rows),
+        employees=rows,
+    )

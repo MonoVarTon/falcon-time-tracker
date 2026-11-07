@@ -1,12 +1,13 @@
 """Что приложение принимает и что отдаёт.
 
 Pydantic проверяет входящие данные до того, как они попадут в логику:
-пустое имя или слишком длинное описание отклоняются ответом 422.
+пустое имя, слишком длинное описание или неизвестный тип записи
+отклоняются ответом 422.
 """
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, StringConstraints
+from pydantic import AwareDatetime, BaseModel, StringConstraints, model_validator
 
 from app.models import DESCRIPTION_MAX_LENGTH, NAME_MAX_LENGTH
 
@@ -15,6 +16,7 @@ Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 Description = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=DESCRIPTION_MAX_LENGTH)
 ]
+Kind = Literal["work", "break", "lunch"]
 
 
 class EmployeeCreate(BaseModel):
@@ -23,10 +25,25 @@ class EmployeeCreate(BaseModel):
     name: Name
 
 
-class TimerStart(BaseModel):
-    """Тело запроса «запустить таймер»."""
+class TimerSwitch(BaseModel):
+    """Тело запроса «переключиться»: перерыв, обед или снова работа.
 
-    description: Description
+    Описание необязательно: у перерыва и обеда оно подставится само,
+    а при возврате к работе продолжится последняя задача.
+    """
+
+    kind: Kind = "work"
+    description: Description | None = None
+
+
+class TimerStart(TimerSwitch):
+    """Тело запроса «запустить таймер». Для работы описание задачи обязательно."""
+
+    @model_validator(mode="after")
+    def _work_needs_description(self) -> "TimerStart":
+        if self.kind == "work" and self.description is None:
+            raise ValueError("Для работы укажите задачу")
+        return self
 
 
 class EntryOut(BaseModel):
@@ -34,6 +51,7 @@ class EntryOut(BaseModel):
 
     id: int
     employee_id: int
+    kind: Kind
     description: str
     started_at: AwareDatetime
     ended_at: AwareDatetime | None
@@ -50,11 +68,13 @@ class EmployeeOut(BaseModel):
 
 
 class EmployeeReport(BaseModel):
-    """Строка отчёта: сотрудник, его записи за период и сумма."""
+    """Строка отчёта: сотрудник, его записи за период и суммы."""
 
     employee_id: int
     name: str
-    total_seconds: int
+    total_seconds: int  # рабочее время — без перерывов и обеда
+    break_seconds: int
+    lunch_seconds: int
     entries: list[EntryOut]
 
 
@@ -63,5 +83,7 @@ class ReportOut(BaseModel):
 
     start: datetime
     end: datetime
-    total_seconds: int
+    total_seconds: int  # рабочее время всех сотрудников
+    break_seconds: int
+    lunch_seconds: int
     employees: list[EmployeeReport]

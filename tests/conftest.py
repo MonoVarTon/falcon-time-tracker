@@ -39,3 +39,22 @@ def session(engine: Engine) -> Iterator[Session]:
     """Сессия для работы с временной базой; закрывается после теста."""
     with Session(engine) as s:
         yield s
+
+
+@pytest.fixture
+def clock():
+    """Управляемые часы, стоят на 07.11.2026 09:00 UTC."""
+    from tests.helpers import START, FakeClock
+
+    return FakeClock(START)
+
+
+@pytest.fixture
+def client(engine: Engine, clock):
+    """Приложение на временной базе и управляемых часах."""
+    from app.main import app
+    from tests.helpers import make_client
+
+    with make_client(engine, clock) as c:
+        yield c
+    app.dependency_overrides.clear()

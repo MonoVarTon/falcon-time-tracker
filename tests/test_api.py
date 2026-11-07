@@ -3,62 +3,14 @@
 Время в тестах управляемое (FakeClock): мы сами говорим, который час,
 и можем «перемотать» его. Так длительность проверяется точно, без sleep().
 """
-from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
-from sqlalchemy.orm import Session
 
-from app.db import get_db, init_db, make_engine
-from app.main import app, get_now
-
-START = datetime(2026, 11, 7, 9, 0, tzinfo=timezone.utc)
-
-
-class FakeClock:
-    """Часы, которые идут только когда мы их двигаем."""
-
-    def __init__(self, now: datetime) -> None:
-        self.now = now
-
-    def advance(self, **kwargs: int) -> None:
-        self.now += timedelta(**kwargs)
-
-
-@pytest.fixture
-def clock() -> FakeClock:
-    return FakeClock(START)
-
-
-def make_client(engine: Engine, clock: FakeClock) -> TestClient:
-    """Приложение, подключённое к временной базе и управляемым часам."""
-    def _db() -> Iterator[Session]:
-        with Session(engine, expire_on_commit=False) as s:
-            yield s
-
-    app.dependency_overrides[get_db] = _db
-    app.dependency_overrides[get_now] = lambda: clock.now
-    return TestClient(app)
-
-
-@pytest.fixture
-def client(engine: Engine, clock: FakeClock) -> Iterator[TestClient]:
-    with make_client(engine, clock) as c:
-        yield c
-    app.dependency_overrides.clear()
-
-
-def add_employee(client: TestClient, name: str = "Иван Тестов") -> int:
-    response = client.post("/api/employees", json={"name": name})
-    assert response.status_code == 201
-    return response.json()["id"]
-
-
-def period(start: datetime, end: datetime) -> dict[str, str]:
-    return {"start": start.isoformat(), "end": end.isoformat()}
-
+from app.db import init_db, make_engine
+from app.main import app
+from tests.helpers import START, FakeClock, add_employee, make_client, period
 
 # ---------- Сотрудники ----------
 
@@ -165,6 +117,8 @@ def test_empty_report_without_employees(client: TestClient) -> None:
         "start": "2026-11-07T09:00:00Z",
         "end": "2026-11-08T09:00:00Z",
         "total_seconds": 0,
+        "break_seconds": 0,
+        "lunch_seconds": 0,
         "employees": [],
     }
 

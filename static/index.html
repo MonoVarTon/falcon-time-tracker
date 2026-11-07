@@ -13,7 +13,9 @@
     --ink: #1e2b33;
     --muted: #5b6a74;
     --line: #c7d2d8;
-    --run: #0b7a5c;     /* «идёт» */
+    --run: #0b7a5c;     /* работа */
+    --break: #44607a;   /* перерыв */
+    --lunch: #a35c00;   /* обед */
     --stop: #b42318;    /* «стоп» и ошибки */
     --focus: #2457c5;
   }
@@ -43,6 +45,8 @@
   }
   button.start { background: var(--run); }
   button.stop { background: var(--stop); }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button.ghost:hover { border-color: var(--muted); }
   button:disabled { opacity: .55; cursor: wait; }
   :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
   .error { color: var(--stop); min-height: 1.5em; margin: 6px 0 0; font-size: 15px; }
@@ -61,6 +65,10 @@
   /* Единственный громкий элемент страницы — идущие часы */
   .clock { font-size: 34px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; color: var(--run); line-height: 1.1; }
   .task { color: var(--muted); flex: 1 1 160px; overflow-wrap: anywhere; }
+  .clock.kind-break, .person.kind-break .status { color: var(--break); }
+  .clock.kind-lunch, .person.kind-lunch .status { color: var(--lunch); }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pauses { display: block; font-size: 13px; color: var(--muted); }
 
   /* Отчёт */
   .period { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
@@ -131,8 +139,14 @@ function formatClock(totalSeconds) {
 function formatHours(totalSeconds) {
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
+  if (totalSeconds > 0 && totalSeconds < 60) return "меньше минуты";  // иначе «0 мин» читается как «не было»
+  if (h === 0) return `${m} мин`;
   return `${h} ч ${String(m).padStart(2, "0")} мин`;
 }
+
+// Как называть состояние сотрудника в зависимости от типа идущей записи.
+const KIND_STATUS = { work: "работает с", break: "на перерыве с", lunch: "на обеде с" };
+const KIND_LABEL = { work: "", break: "Перерыв", lunch: "Обед" };
 
 function formatTime(iso) {
   return new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -172,10 +186,12 @@ async function loadEmployees() {
   running = [];
   $("people-empty").hidden = employees.length > 0;
 
-  const workingNow = employees.filter((e) => e.active_entry).length;
+  const workingNow = employees.filter((e) => e.active_entry && e.active_entry.kind === "work").length;
+  const pausedNow = employees.filter((e) => e.active_entry && e.active_entry.kind !== "work").length;
   $("now-working").replaceChildren();
   if (employees.length) {
     $("now-working").append("Сейчас работают: ", el("strong", {}, `${workingNow} из ${employees.length}`));
+    if (pausedNow) $("now-working").append(`, на перерыве или обеде: ${pausedNow}`);
   }
 
   for (const employee of employees) list.append(renderEmployee(employee, fetchedAt));
@@ -183,32 +199,48 @@ async function loadEmployees() {
 
 function renderEmployee(employee, fetchedAt) {
   const entry = employee.active_entry;
-  const item = el("li", { class: entry ? "person running" : "person" });
+  const item = el("li", { class: entry ? `person running kind-${entry.kind}` : "person" });
   const head = el("div", { class: "person-head" });
   head.append(el("span", { class: "person-name" }, employee.name),
-              el("span", { class: "status" }, entry ? `работает с ${formatTime(entry.started_at)}` : "не на таймере"));
+              el("span", { class: "status" },
+                 entry ? `${KIND_STATUS[entry.kind]} ${formatTime(entry.started_at)}` : "не на таймере"));
   item.append(head);
   const error = el("p", { class: "error", role: "alert" });
 
   if (entry) {
     const row = el("div", { class: "running-row" });
-    const clock = el("span", { class: "clock", "aria-live": "off" }, formatClock(entry.duration_seconds));
-    const stop = el("button", { type: "button", class: "stop" }, "Остановить");
+    const clock = el("span", { class: `clock kind-${entry.kind}`, "aria-live": "off" },
+                     formatClock(entry.duration_seconds));
+    const actions = el("div", { class: "actions" });
+    // Кнопка переключения: закрывает текущую запись и сразу открывает новую.
+    const switchButton = (label, kind, cls) => {
+      const button = el("button", { type: "button", class: cls }, label);
+      button.addEventListener("click", () => act(button, error, () =>
+        api("POST", `/api/employees/${employee.id}/timer/switch`, { kind })));
+      return button;
+    };
+    if (entry.kind === "work") {
+      actions.append(switchButton("Перерыв", "break", "ghost"), switchButton("Обед", "lunch", "ghost"));
+    } else {
+      actions.append(switchButton("Вернуться к работе", "work", "start"));
+    }
+    const stop = el("button", { type: "button", class: "stop" }, "Закончить");
     stop.addEventListener("click", () => act(stop, error, () =>
       api("POST", `/api/employees/${employee.id}/timer/stop`)));
-    row.append(clock, el("span", { class: "task" }, entry.description), stop);
+    actions.append(stop);
+    row.append(clock, el("span", { class: "task" }, entry.description), actions);
     item.append(row);
     running.push({ element: clock, baseSeconds: entry.duration_seconds, fetchedAt });
   } else {
     const form = el("form", { class: "inline" });
     const input = el("input", { type: "text", placeholder: "Над чем работаете?", maxlength: "500",
                                 "aria-label": `Задача для: ${employee.name}`, required: "" });
-    const start = el("button", { type: "submit", class: "start" }, "Запустить таймер");
+    const start = el("button", { type: "submit", class: "start" }, "Начать работу");
     form.append(input, start);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       act(start, error, () => api("POST", `/api/employees/${employee.id}/timer/start`,
-                                  { description: input.value }));
+                                  { kind: "work", description: input.value }));
     });
     item.append(form);
   }
@@ -289,7 +321,7 @@ function renderReport(report) {
   }
   const table = el("table");
   const head = el("tr");
-  head.append(el("th", {}, "Сотрудник"), el("th", { class: "num" }, "Время"));
+  head.append(el("th", {}, "Сотрудник"), el("th", { class: "num" }, "Работа"));
   table.append(head);
 
   for (const row of report.employees) {
@@ -301,7 +333,8 @@ function renderReport(report) {
       const ul = el("ul");
       for (const entry of row.entries) {
         const end = entry.is_running ? "сейчас" : formatTime(entry.ended_at);
-        const li = el("li", {}, `${formatTime(entry.started_at)} – ${end} · ${entry.description}`);
+        const what = KIND_LABEL[entry.kind] || entry.description;
+        const li = el("li", {}, `${formatTime(entry.started_at)} – ${end} · ${what}`);
         if (entry.is_running) li.append(" ", el("span", { class: "live" }, "(идёт)"));
         ul.append(li);
       }
@@ -310,13 +343,25 @@ function renderReport(report) {
     } else {
       who.textContent = row.name;
     }
-    tr.append(who, el("td", { class: "num" }, formatHours(row.total_seconds)));
+    const time = el("td", { class: "num" }, formatHours(row.total_seconds));
+    time.append(pausesLine(row));
+    tr.append(who, time);
     table.append(tr);
   }
   const total = el("tr", { class: "total" });
-  total.append(el("td", {}, "Итого"), el("td", { class: "num" }, formatHours(report.total_seconds)));
+  const totalTime = el("td", { class: "num" }, formatHours(report.total_seconds));
+  totalTime.append(pausesLine(report));
+  total.append(el("td", {}, "Итого работы"), totalTime);
   table.append(total);
   box.append(table);
+}
+
+// Подпись под временем: перерывы и обед — если они были.
+function pausesLine(row) {
+  const parts = [];
+  if (row.break_seconds) parts.push(`перерывы ${formatHours(row.break_seconds)}`);
+  if (row.lunch_seconds) parts.push(`обед ${formatHours(row.lunch_seconds)}`);
+  return el("span", { class: "pauses" }, parts.join(", "));
 }
 
 $("report-form").addEventListener("submit", async (event) => {

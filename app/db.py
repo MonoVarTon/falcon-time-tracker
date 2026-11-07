@@ -6,7 +6,7 @@
 import os
 from collections.abc import Iterator
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 # Файл базы по умолчанию лежит рядом с проектом. Адрес можно переопределить
@@ -42,10 +42,28 @@ def make_engine(url: str) -> Engine:
 
 
 def init_db(engine: Engine) -> None:
-    """Создаёт таблицы, которых ещё нет. Существующие данные не трогает."""
+    """Создаёт таблицы, которых ещё нет, и обновляет старые. Данные не трогает."""
     from app import models  # noqa: F401 — импорт регистрирует таблицы в Base
 
     Base.metadata.create_all(engine)
+    _upgrade_schema(engine)
+
+
+def _upgrade_schema(engine: Engine) -> None:
+    """Маленькая миграция: добавляет колонки, появившиеся в новых версиях.
+
+    create_all создаёт только НОВЫЕ таблицы и не меняет существующие.
+    Поэтому база, созданная до появления перерывов, осталась бы без колонки
+    kind — и приложение упало бы. Здесь мы добавляем её, если её нет.
+    Старые записи получают тип «work» (значение по умолчанию).
+    Запуск повторно безопасен: колонка уже есть — ничего не делаем.
+    """
+    columns = {column["name"] for column in inspect(engine).get_columns("time_entries")}
+    if "kind" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE time_entries ADD COLUMN kind VARCHAR(10) NOT NULL DEFAULT 'work'"
+            ))
 
 
 engine = make_engine(os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL))
