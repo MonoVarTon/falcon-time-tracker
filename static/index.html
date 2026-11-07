@@ -14,8 +14,11 @@
     --muted: #5b6a74;
     --line: #c7d2d8;
     --run: #0b7a5c;     /* работа */
-    --break: #44607a;   /* перерыв */
+    --break: #2a78d6;   /* перерыв — полоски и метки */
     --lunch: #a35c00;   /* обед */
+    --break-ink: #1c5cab; /* перерыв — для текста (контраст выше) */
+    /* Тройка работа / перерыв / обед проверена на различимость, в т. ч. при
+       нарушениях цветовосприятия (валидатор палитры, все проверки пройдены). */
     --stop: #b42318;    /* «стоп» и ошибки */
     --focus: #2457c5;
   }
@@ -65,14 +68,14 @@
   /* Единственный громкий элемент страницы — идущие часы */
   .clock { font-size: 34px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; color: var(--run); line-height: 1.1; }
   .task { color: var(--muted); flex: 1 1 160px; overflow-wrap: anywhere; }
-  .clock.kind-break, .person.kind-break .status { color: var(--break); }
+  .clock.kind-break, .person.kind-break .status { color: var(--break-ink); }
   .clock.kind-lunch, .person.kind-lunch .status { color: var(--lunch); }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .clock-box { display: flex; flex-direction: column; }
   .clock-label { font-size: 13px; color: var(--muted); }
   .clock.frozen { color: var(--muted); }   /* работа на паузе: часы стоят */
   .pause-clock { font-size: 15px; font-variant-numeric: tabular-nums; }
-  .pause-clock.kind-break { color: var(--break); }
+  .pause-clock.kind-break { color: var(--break-ink); }
   .pause-clock.kind-lunch { color: var(--lunch); }
   .day-line { font-size: 14px; color: var(--muted); margin: 6px 0 0; }
   .pauses { display: block; font-size: 13px; color: var(--muted); }
@@ -88,6 +91,24 @@
   details summary { cursor: pointer; }
   details ul { margin: 6px 0 2px; padding-left: 18px; color: var(--muted); font-size: 14px; }
   .live { color: var(--run); }
+  .count { display: block; font-size: 13px; color: var(--muted); }
+
+  /* Лента дня */
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--muted); margin-top: 14px; }
+  .legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+                         margin-right: 6px; vertical-align: -1px; background: var(--swatch); }
+  td.lanes { border-top: 0; padding-top: 0; }
+  .lane { display: grid; grid-template-columns: 52px 1fr; align-items: center; gap: 8px; margin: 3px 0; }
+  .lane-date { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .track { position: relative; height: 14px; background: #e3e9ec; border-radius: 4px; }
+  .seg { position: absolute; top: 0; bottom: 0; border-radius: 3px;
+         border-left: 1px solid var(--panel); border-right: 1px solid var(--panel); }  /* 2px зазор между кусками */
+  .seg.kind-work { background: var(--run); }
+  .seg.kind-break { background: var(--break); }
+  .seg.kind-lunch { background: var(--lunch); }
+  .now-mark { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); border-radius: 1px; }
+  .axis { position: relative; height: 16px; margin-left: 60px;  /* = подпись даты 52px + зазор 8px */ font-size: 11px; color: var(--muted); }
+  .axis span { position: absolute; transform: translateX(-50%); }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
@@ -123,6 +144,7 @@
   </main>
 </div>
 
+<script src="/static/timeline.js"></script>
 <script>
 "use strict";
 // Весь пользовательский текст выводится через textContent — не через innerHTML.
@@ -154,6 +176,19 @@ function formatHours(totalSeconds) {
 // Как называть состояние сотрудника в зависимости от типа идущей записи.
 const KIND_STATUS = { work: "работает с", break: "на перерыве с", lunch: "на обеде с" };
 const KIND_LABEL = { work: "", break: "Перерыв", lunch: "Обед" };
+const KIND_NAME = { work: "Работа", break: "Перерыв", lunch: "Обед" };
+
+// Русские окончания: 1 запись, 2 записи, 5 записей.
+function plural(n, one, few, many) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function clockTime(date) {
+  return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
 
 function formatTime(iso) {
   return new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -349,10 +384,63 @@ async function loadReport() {
   }
   const params = new URLSearchParams({ start: start.toISOString(), end: end.toISOString() });
   const report = await api("GET", `/api/report?${params}`);
-  renderReport(report);
+  renderReport(report, start, end, new Date());
 }
 
-function renderReport(report) {
+// Полоски дня одного сотрудника на общей шкале часов.
+function renderLanes(entries, start, end, now, scale, shownDays) {
+  const lanes = buildLanes(entries, start, end, now);
+  const box = document.createDocumentFragment();
+  const span = scale.windowEnd - scale.windowStart;
+  const multiDay = shownDays.size > 1;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  for (const day of lanes.days) {
+    if (!shownDays.has(day.date.getTime())) continue;  // день без записей у всех — пропускаем
+    const row = el("div", { class: "lane" });
+    const label = multiDay ? day.date.toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "2-digit" }) : "";
+    const track = el("div", { class: "track" });
+    const described = [];
+    for (const seg of day.segments) {
+      const left = ((seg.from - scale.windowStart) / span) * 100;
+      const width = ((seg.to - seg.from) / span) * 100;
+      const text = `${KIND_NAME[seg.kind]} ${clockTime(seg.start)}–${clockTime(seg.end)}` +
+                   (seg.kind === "work" ? ` · ${seg.description}` : "");
+      const piece = el("div", { class: `seg kind-${seg.kind}`, title: text });
+      piece.style.left = `${left}%`;
+      piece.style.width = `${Math.max(width, 0.4)}%`;  // очень короткий кусок всё равно виден
+      track.append(piece);
+      described.push(text);
+    }
+    if (day.date.getTime() === today) {
+      const hours = (now - day.date) / 3600000;
+      if (hours >= scale.windowStart && hours <= scale.windowEnd) {
+        const mark = el("div", { class: "now-mark", title: `Сейчас ${clockTime(now)}` });
+        mark.style.left = `${((hours - scale.windowStart) / span) * 100}%`;
+        track.append(mark);
+      }
+    }
+    // Для экранного диктора — та же лента словами.
+    track.setAttribute("role", "img");
+    track.setAttribute("aria-label", described.length ? described.join("; ") : "Записей нет");
+    row.append(el("span", { class: "lane-date" }, label), track);
+    box.append(row);
+  }
+  return box;
+}
+
+function renderAxis(scale) {
+  const axis = el("div", { class: "axis", "aria-hidden": "true" });
+  const span = scale.windowEnd - scale.windowStart;
+  const step = span > 12 ? 3 : 2;
+  for (let h = Math.ceil(scale.windowStart / step) * step; h <= scale.windowEnd; h += step) {
+    const tick = el("span", {}, `${h}:00`);
+    tick.style.left = `${((h - scale.windowStart) / span) * 100}%`;
+    axis.append(tick);
+  }
+  return axis;
+}
+
+function renderReport(report, start, end, now) {
   const box = $("report");
   box.replaceChildren();
   if (!report.employees.length) {
@@ -362,17 +450,43 @@ function renderReport(report) {
   if (report.total_seconds === 0) {
     box.append(el("p", { class: "empty" }, "За этот период записей нет — у всех ноль."));
   }
+  // Общая шкала часов для всех сотрудников — чтобы полосы можно было сравнивать.
+  const allEntries = report.employees.flatMap((row) => row.entries);
+  const scale = buildLanes(allEntries, start, end, now);
+  if (scale.tooLong) {
+    box.append(el("p", { class: "empty" }, "Лента дня показывается для периода до 14 дней."));
+  } else {
+    const legend = el("div", { class: "legend" });
+    for (const [kind, color] of [["work", "--run"], ["break", "--break"], ["lunch", "--lunch"]]) {
+      const item = el("span", {}, KIND_NAME[kind]);
+      item.style.setProperty("--swatch", `var(${color})`);
+      legend.append(item);
+    }
+    box.append(legend);
+  }
+  const shownDays = scale.tooLong ? new Set() : activeDays(scale);
   const table = el("table");
   const head = el("tr");
   head.append(el("th", {}, "Сотрудник"), el("th", { class: "num" }, "Работа"));
   table.append(head);
+  if (!scale.tooLong) {
+    // Шкала часов — сразу над первой полосой, в той же сетке, что и полосы.
+    const axisRow = el("tr");
+    const axisCell = el("td", { class: "lanes", colspan: "2" });
+    axisCell.append(renderAxis(scale));
+    axisRow.append(axisCell);
+    table.append(axisRow);
+  }
 
   for (const row of report.employees) {
     const tr = el("tr");
     const who = el("td");
     if (row.entries.length) {
       const details = el("details");
-      details.append(el("summary", {}, `${row.name} · записей: ${row.entries.length}`));
+      const summary = el("summary", {}, row.name);
+      const n = row.entries.length;
+      summary.append(el("span", { class: "count" }, `${n} ${plural(n, "запись", "записи", "записей")}`));
+      details.append(summary);
       const ul = el("ul");
       for (const entry of row.entries) {
         const end = entry.is_running ? "сейчас" : formatTime(entry.ended_at);
@@ -390,6 +504,13 @@ function renderReport(report) {
     time.append(pausesLine(row));
     tr.append(who, time);
     table.append(tr);
+    if (!scale.tooLong) {
+      const lanesRow = el("tr");
+      const cell = el("td", { class: "lanes", colspan: "2" });
+      cell.append(renderLanes(row.entries, start, end, now, scale, shownDays));
+      lanesRow.append(cell);
+      table.append(lanesRow);
+    }
   }
   const total = el("tr", { class: "total" });
   const totalTime = el("td", { class: "num" }, formatHours(report.total_seconds));
