@@ -3,7 +3,14 @@
 Каждый тест получает собственный временный файл базы: тесты не мешают
 друг другу и не трогают рабочую базу приложения.
 """
+import os
+import tempfile
 from collections.abc import Iterator
+
+# Тесты никогда не трогают рабочую базу. app.db читает адрес базы при импорте,
+# поэтому подставляем временный файл ДО импорта приложения (строки ниже).
+# Ставим принудительно: даже если у разработчика задан свой DATABASE_URL.
+os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp(prefix='ftt-tests-')}/app.db"
 
 import pytest
 from sqlalchemy import Engine

@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Учёт рабочего времени</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #e6ecef;      /* холодный серо-голубой фон, как стена у табельных часов */
+    --panel: #f6f8f9;
+    --ink: #1e2b33;
+    --muted: #5b6a74;
+    --line: #c7d2d8;
+    --run: #0b7a5c;     /* «идёт» */
+    --stop: #b42318;    /* «стоп» и ошибки */
+    --focus: #2457c5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 "IBM Plex Sans", system-ui, sans-serif;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; margin-bottom: 28px; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .now-working { color: var(--muted); margin: 0; }
+  .now-working strong { color: var(--run); font-weight: 600; }
+  main { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  h2 { font-size: 19px; font-weight: 600; margin: 0 0 14px; }
+  form.inline { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=text], input[type=date] {
+    font: inherit; color: inherit; background: #fff; border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; min-width: 0;
+  }
+  input[type=text] { flex: 1 1 180px; }
+  button {
+    font: inherit; font-weight: 500; border: 0; border-radius: 6px; padding: 8px 16px;
+    cursor: pointer; color: #fff; background: var(--ink); white-space: nowrap;
+  }
+  button.start { background: var(--run); }
+  button.stop { background: var(--stop); }
+  button:disabled { opacity: .55; cursor: wait; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  .error { color: var(--stop); min-height: 1.5em; margin: 6px 0 0; font-size: 15px; }
+  .empty { color: var(--muted); margin: 8px 0 0; }
+
+  /* Строка сотрудника — «карточка табеля» */
+  .people { list-style: none; margin: 18px 0 0; padding: 0; }
+  .person { padding: 14px 0; border-top: 1px solid var(--line); }
+  .person-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .person-name { font-weight: 600; }
+  .status { font-size: 14px; color: var(--muted); }
+  .person.running .status { color: var(--run); }
+  .person form { margin-top: 8px; }
+  .person .error { min-height: 0; margin: 4px 0 0; }  /* место под ошибку — только когда она есть */
+  .running-row { display: flex; align-items: center; gap: 14px; margin-top: 6px; flex-wrap: wrap; }
+  /* Единственный громкий элемент страницы — идущие часы */
+  .clock { font-size: 34px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; color: var(--run); line-height: 1.1; }
+  .task { color: var(--muted); flex: 1 1 160px; overflow-wrap: anywhere; }
+
+  /* Отчёт */
+  .period { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  .period label { display: flex; flex-direction: column; font-size: 14px; color: var(--muted); gap: 4px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 500; color: var(--muted); font-size: 14px; border-top: 0; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  tr.total td { font-weight: 600; border-top: 2px solid var(--ink); }
+  details summary { cursor: pointer; }
+  details ul { margin: 6px 0 2px; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  .live { color: var(--run); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Учёт рабочего времени</h1>
+    <p class="now-working" id="now-working"></p>
+  </header>
+
+  <main>
+    <section aria-labelledby="people-title">
+      <h2 id="people-title">Сотрудники</h2>
+      <form class="inline" id="add-form">
+        <input type="text" id="new-name" placeholder="Имя и фамилия" maxlength="100" aria-label="Имя нового сотрудника" required>
+        <button type="submit">Добавить сотрудника</button>
+      </form>
+      <p class="error" id="add-error" role="alert"></p>
+      <p class="empty" id="people-empty" hidden>Пока никого нет. Добавьте первого сотрудника — и сможете запускать его таймер.</p>
+      <ul class="people" id="people"></ul>
+    </section>
+
+    <section aria-labelledby="report-title">
+      <h2 id="report-title">Отчёт за период</h2>
+      <form class="period" id="report-form">
+        <label>С <input type="date" id="date-from" required></label>
+        <label>По <input type="date" id="date-to" required></label>
+        <button type="submit">Показать отчёт</button>
+      </form>
+      <p class="error" id="report-error" role="alert"></p>
+      <div id="report"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+// Весь пользовательский текст выводится через textContent — не через innerHTML.
+// Так имя с HTML-тегами покажется буквами и не выполнится.
+// ВНИМАНИЕ: внутри этого блока нельзя писать закрывающий тег скрипта даже в комментарии —
+// браузер решит, что скрипт закончился, и остальной код не выполнится (была такая ошибка).
+
+const $ = (id) => document.getElementById(id);
+
+// Часы идущих таймеров считаем от данных сервера, а не от часов компьютера:
+// сервер прислал «прошло N секунд» в момент fetchedAt, дальше просто прибавляем.
+let running = [];      // [{ element, baseSeconds, fetchedAt }]
+
+function formatClock(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function formatHours(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  return `${h} ч ${String(m).padStart(2, "0")} мин`;
+}
+
+function formatTime(iso) {
+  return new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function el(tag, attrs = {}, text) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// Запрос к API; при ошибке — понятный текст из ответа сервера.
+async function api(method, url, body) {
+  const response = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    let message = `Ошибка ${response.status}`;
+    if (data && typeof data.detail === "string") message = data.detail;
+    else if (response.status === 422) message = "Проверьте ввод: поле пустое или слишком длинное";
+    throw new Error(message);
+  }
+  return data;
+}
+
+// ---------- Сотрудники ----------
+
+async function loadEmployees() {
+  const employees = await api("GET", "/api/employees");
+  const fetchedAt = Date.now();
+  const list = $("people");
+  list.replaceChildren();
+  running = [];
+  $("people-empty").hidden = employees.length > 0;
+
+  const workingNow = employees.filter((e) => e.active_entry).length;
+  $("now-working").replaceChildren();
+  if (employees.length) {
+    $("now-working").append("Сейчас работают: ", el("strong", {}, `${workingNow} из ${employees.length}`));
+  }
+
+  for (const employee of employees) list.append(renderEmployee(employee, fetchedAt));
+}
+
+function renderEmployee(employee, fetchedAt) {
+  const entry = employee.active_entry;
+  const item = el("li", { class: entry ? "person running" : "person" });
+  const head = el("div", { class: "person-head" });
+  head.append(el("span", { class: "person-name" }, employee.name),
+              el("span", { class: "status" }, entry ? `работает с ${formatTime(entry.started_at)}` : "не на таймере"));
+  item.append(head);
+  const error = el("p", { class: "error", role: "alert" });
+
+  if (entry) {
+    const row = el("div", { class: "running-row" });
+    const clock = el("span", { class: "clock", "aria-live": "off" }, formatClock(entry.duration_seconds));
+    const stop = el("button", { type: "button", class: "stop" }, "Остановить");
+    stop.addEventListener("click", () => act(stop, error, () =>
+      api("POST", `/api/employees/${employee.id}/timer/stop`)));
+    row.append(clock, el("span", { class: "task" }, entry.description), stop);
+    item.append(row);
+    running.push({ element: clock, baseSeconds: entry.duration_seconds, fetchedAt });
+  } else {
+    const form = el("form", { class: "inline" });
+    const input = el("input", { type: "text", placeholder: "Над чем работаете?", maxlength: "500",
+                                "aria-label": `Задача для: ${employee.name}`, required: "" });
+    const start = el("button", { type: "submit", class: "start" }, "Запустить таймер");
+    form.append(input, start);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      act(start, error, () => api("POST", `/api/employees/${employee.id}/timer/start`,
+                                  { description: input.value }));
+    });
+    item.append(form);
+  }
+  item.append(error);
+  return item;
+}
+
+// Общая обёртка для кнопок: блокируем на время запроса, показываем ошибку, обновляем экран.
+async function act(button, errorNode, request) {
+  button.disabled = true;
+  errorNode.textContent = "";
+  try {
+    await request();
+    await loadEmployees();
+    if ($("report").childElementCount) await loadReport();
+  } catch (error) {
+    errorNode.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+$("add-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  $("add-error").textContent = "";
+  try {
+    await api("POST", "/api/employees", { name: $("new-name").value });
+    $("new-name").value = "";
+    await loadEmployees();
+  } catch (error) {
+    $("add-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+setInterval(() => {
+  const now = Date.now();
+  for (const timer of running) {
+    timer.element.textContent = formatClock(timer.baseSeconds + Math.floor((now - timer.fetchedAt) / 1000));
+  }
+}, 1000);
+
+// ---------- Отчёт ----------
+
+// Даты из полей — это местные сутки. Начало: полночь первого дня по местному
+// времени; конец: полночь дня ПОСЛЕ последнего. Отправляем с поясом (toISOString даёт UTC).
+function periodFromInputs() {
+  const [fy, fm, fd] = $("date-from").value.split("-").map(Number);
+  const [ty, tm, td] = $("date-to").value.split("-").map(Number);
+  const start = new Date(fy, fm - 1, fd);
+  const end = new Date(ty, tm - 1, td + 1);
+  return { start, end };
+}
+
+async function loadReport() {
+  $("report-error").textContent = "";
+  const { start, end } = periodFromInputs();
+  if (end <= start) {
+    $("report-error").textContent = "Дата «по» не может быть раньше даты «с»";
+    return;
+  }
+  const params = new URLSearchParams({ start: start.toISOString(), end: end.toISOString() });
+  const report = await api("GET", `/api/report?${params}`);
+  renderReport(report);
+}
+
+function renderReport(report) {
+  const box = $("report");
+  box.replaceChildren();
+  if (!report.employees.length) {
+    box.append(el("p", { class: "empty" }, "Сотрудников пока нет — отчёт пуст."));
+    return;
+  }
+  if (report.total_seconds === 0) {
+    box.append(el("p", { class: "empty" }, "За этот период записей нет — у всех ноль."));
+  }
+  const table = el("table");
+  const head = el("tr");
+  head.append(el("th", {}, "Сотрудник"), el("th", { class: "num" }, "Время"));
+  table.append(head);
+
+  for (const row of report.employees) {
+    const tr = el("tr");
+    const who = el("td");
+    if (row.entries.length) {
+      const details = el("details");
+      details.append(el("summary", {}, `${row.name} · записей: ${row.entries.length}`));
+      const ul = el("ul");
+      for (const entry of row.entries) {
+        const end = entry.is_running ? "сейчас" : formatTime(entry.ended_at);
+        const li = el("li", {}, `${formatTime(entry.started_at)} – ${end} · ${entry.description}`);
+        if (entry.is_running) li.append(" ", el("span", { class: "live" }, "(идёт)"));
+        ul.append(li);
+      }
+      details.append(ul);
+      who.append(details);
+    } else {
+      who.textContent = row.name;
+    }
+    tr.append(who, el("td", { class: "num" }, formatHours(row.total_seconds)));
+    table.append(tr);
+  }
+  const total = el("tr", { class: "total" });
+  total.append(el("td", {}, "Итого"), el("td", { class: "num" }, formatHours(report.total_seconds)));
+  table.append(total);
+  box.append(table);
+}
+
+$("report-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try { await loadReport(); } catch (error) { $("report-error").textContent = error.message; }
+});
+
+// Старт: по умолчанию — отчёт за сегодня.
+const today = new Date();
+const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+$("date-from").value = iso;
+$("date-to").value = iso;
+loadEmployees().catch((error) => { $("add-error").textContent = `Не удалось загрузить сотрудников: ${error.message}`; });
+</script>
+</body>
+</html>
