@@ -49,7 +49,7 @@ def test_finished_long_entry_is_not_flagged(client: TestClient, clock: FakeClock
 def test_long_break_is_flagged_too(client: TestClient, clock: FakeClock) -> None:
     employee_id = add_employee(client)
     client.post(f"/api/employees/{employee_id}/timer/start", json={"kind": "lunch"})
-    clock.advance(hours=12)
+    clock.advance(hours=11)  # на 12 ч таймер уже остановится сам (tests/test_autostop.py)
 
     assert active(client)["is_too_long"] is True
 

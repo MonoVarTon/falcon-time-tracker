@@ -17,7 +17,16 @@ from sqlalchemy.orm import Session
 
 from app import services
 from app.db import engine, get_db, init_db
-from app.schemas import DaySummary, EmployeeCreate, EmployeeOut, EntryOut, ReportOut, TimerStart, TimerSwitch
+from app.schemas import (
+    DaySummary,
+    EmployeeCreate,
+    EmployeeOut,
+    EntryOut,
+    ReportOut,
+    TimerExtend,
+    TimerStart,
+    TimerSwitch,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -37,9 +46,25 @@ def get_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def get_checked_db(db: Session = Depends(get_db), now: datetime = Depends(get_now)) -> Session:
+    """Сессия базы, в которой просроченные таймеры уже закрыты.
+
+    Каждый запрос сначала закрывает таймеры, перешедшие свой предел
+    (12 ч или продлённый), — поэтому все ответы видят актуальное состояние.
+    """
+    services.auto_stop_overdue(db, now)
+    return db
+
+
 @app.exception_handler(services.EmployeeNotFound)
-async def _not_found(_request: Request, error: services.EmployeeNotFound) -> JSONResponse:
+@app.exception_handler(services.EntryNotFound)
+async def _not_found(_request: Request, error: Exception) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(error)})
+
+
+@app.exception_handler(services.LimitTooHigh)
+async def _limit_too_high(_request: Request, error: services.LimitTooHigh) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(error)})
 
 
 @app.exception_handler(services.MissingDescription)
@@ -54,7 +79,7 @@ async def _conflict(_request: Request, error: Exception) -> JSONResponse:
 
 
 @app.post("/api/employees", status_code=201, response_model=EmployeeOut)
-def add_employee(body: EmployeeCreate, db: Session = Depends(get_db)) -> EmployeeOut:
+def add_employee(body: EmployeeCreate, db: Session = Depends(get_checked_db)) -> EmployeeOut:
     """Добавить сотрудника."""
     employee = services.create_employee(db, body.name)
     empty_day = DaySummary(work_seconds=0, break_seconds=0, lunch_seconds=0)
@@ -66,7 +91,7 @@ def employees(
     since: AwareDatetime | None = Query(
         default=None, description="Начало «сегодня» у пользователя (местная полночь), с часовым поясом"
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_checked_db),
     now: datetime = Depends(get_now),
 ) -> list[EmployeeOut]:
     """Список сотрудников: идущий таймер и итоги дня («отработано сегодня»).
@@ -90,7 +115,7 @@ def employees(
 
 @app.post("/api/employees/{employee_id}/timer/start", status_code=201, response_model=EntryOut)
 def start_timer(
-    employee_id: int, body: TimerStart, db: Session = Depends(get_db), now: datetime = Depends(get_now)
+    employee_id: int, body: TimerStart, db: Session = Depends(get_checked_db), now: datetime = Depends(get_now)
 ) -> EntryOut:
     """Запустить таймер: работа с задачей, перерыв или обед."""
     entry = services.start_timer(db, employee_id, body.description, now, kind=body.kind)
@@ -99,7 +124,7 @@ def start_timer(
 
 @app.post("/api/employees/{employee_id}/timer/switch", status_code=201, response_model=EntryOut)
 def switch_timer(
-    employee_id: int, body: TimerSwitch, db: Session = Depends(get_db), now: datetime = Depends(get_now)
+    employee_id: int, body: TimerSwitch, db: Session = Depends(get_checked_db), now: datetime = Depends(get_now)
 ) -> EntryOut:
     """Перерыв, обед или «вернуться к работе» — одним нажатием, без разрыва во времени."""
     entry = services.switch_timer(db, employee_id, body.kind, body.description, now)
@@ -107,9 +132,18 @@ def switch_timer(
 
 
 @app.post("/api/employees/{employee_id}/timer/stop", response_model=EntryOut)
-def stop_timer(employee_id: int, db: Session = Depends(get_db), now: datetime = Depends(get_now)) -> EntryOut:
+def stop_timer(employee_id: int, db: Session = Depends(get_checked_db), now: datetime = Depends(get_now)) -> EntryOut:
     """Остановить идущий таймер."""
     entry = services.stop_timer(db, employee_id, now)
+    return services.entry_out(entry, now)
+
+
+@app.post("/api/entries/{entry_id}/extend", response_model=EntryOut)
+def extend_entry(
+    entry_id: int, body: TimerExtend, db: Session = Depends(get_checked_db), now: datetime = Depends(get_now)
+) -> EntryOut:
+    """Продлить рабочий день идущей записи — с подтверждением руководителя."""
+    entry = services.extend_limit(db, entry_id, body.approved_by, body.hours)
     return services.entry_out(entry, now)
 
 
@@ -117,7 +151,7 @@ def stop_timer(employee_id: int, db: Session = Depends(get_db), now: datetime = 
 def report(
     start: AwareDatetime = Query(description="Начало периода, с часовым поясом"),
     end: AwareDatetime = Query(description="Конец периода (не включая), с часовым поясом"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_checked_db),
     now: datetime = Depends(get_now),
 ) -> ReportOut:
     """Записи и общее время каждого сотрудника за период."""

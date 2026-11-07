@@ -49,21 +49,35 @@ def init_db(engine: Engine) -> None:
     _upgrade_schema(engine)
 
 
+# Колонки, появившиеся после первой версии: имя → определение для ALTER TABLE.
+# Порядок — порядок появления. Старые записи получают значения по умолчанию.
+ADDED_COLUMNS = {
+    "kind": "VARCHAR(10) NOT NULL DEFAULT 'work'",          # перерыв и обед
+    "limit_hours": "INTEGER NOT NULL DEFAULT 12",           # автоостановка
+    "approved_by": "VARCHAR(100)",                          # продление руководителем
+    "auto_stopped": "BOOLEAN NOT NULL DEFAULT 0",
+    "corrected": "BOOLEAN NOT NULL DEFAULT 0",              # исправление времени
+    "correction_note": "VARCHAR(200)",
+}
+
+
 def _upgrade_schema(engine: Engine) -> None:
     """Маленькая миграция: добавляет колонки, появившиеся в новых версиях.
 
     create_all создаёт только НОВЫЕ таблицы и не меняет существующие.
-    Поэтому база, созданная до появления перерывов, осталась бы без колонки
-    kind — и приложение упало бы. Здесь мы добавляем её, если её нет.
-    Старые записи получают тип «work» (значение по умолчанию).
-    Запуск повторно безопасен: колонка уже есть — ничего не делаем.
+    Поэтому база прошлой версии осталась бы без новых колонок — и приложение
+    упало бы. Здесь мы добавляем недостающие. Запуск повторно безопасен:
+    колонка уже есть — пропускаем.
+
+    Имена и определения берутся только из ADDED_COLUMNS (константа в коде),
+    а не из пользовательского ввода — поэтому подстановка в SQL здесь безопасна.
     """
-    columns = {column["name"] for column in inspect(engine).get_columns("time_entries")}
-    if "kind" not in columns:
+    existing = {column["name"] for column in inspect(engine).get_columns("time_entries")}
+    missing = [(name, ddl) for name, ddl in ADDED_COLUMNS.items() if name not in existing]
+    if missing:
         with engine.begin() as connection:
-            connection.execute(text(
-                "ALTER TABLE time_entries ADD COLUMN kind VARCHAR(10) NOT NULL DEFAULT 'work'"
-            ))
+            for name, ddl in missing:
+                connection.execute(text(f"ALTER TABLE time_entries ADD COLUMN {name} {ddl}"))
 
 
 engine = make_engine(os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL))

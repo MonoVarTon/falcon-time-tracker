@@ -4,13 +4,13 @@
 можно объяснить и проверить отдельно. Текущее время передаётся параметром
 (now), а не берётся внутри: так тесты могут «управлять часами».
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, Employee, TimeEntry
+from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, MAX_LIMIT_HOURS, Employee, TimeEntry
 from app.schemas import DaySummary, EmployeeReport, EntryOut, ReportOut
 
 
@@ -28,6 +28,14 @@ class NoRunningTimer(Exception):
 
 class MissingDescription(Exception):
     """Вернуться к работе нельзя: нет ни новой задачи, ни прошлой."""
+
+
+class EntryNotFound(Exception):
+    """Записи с таким id нет."""
+
+
+class LimitTooHigh(Exception):
+    """Продление сверх суток."""
 
 
 # Таймер, идущий дольше этого, скорее всего забыли выключить.
@@ -141,6 +149,46 @@ def stop_timer(db: Session, employee_id: int, now: datetime) -> TimeEntry:
     return entry
 
 
+def auto_stop_overdue(db: Session, now: datetime) -> int:
+    """Закрывает идущие записи, перешедшие свой предел (по умолчанию 12 ч).
+
+    Закрываем ровно на отметке «начало + предел», а не «сейчас»: если в
+    приложение заглянули через 30 часов, в отчёт всё равно попадёт 12.
+    Вызывается перед каждым запросом — отдельная фоновая программа не нужна.
+    Возвращает, сколько записей закрыто.
+    """
+    running = db.scalars(select(TimeEntry).where(TimeEntry.ended_at.is_(None))).all()
+    stopped = 0
+    for entry in running:
+        limit_end = entry.started_at + timedelta(hours=entry.limit_hours)
+        if now >= limit_end:
+            entry.ended_at = limit_end
+            entry.auto_stopped = True
+            stopped += 1
+    if stopped:
+        db.commit()
+    return stopped
+
+
+def extend_limit(db: Session, entry_id: int, approved_by: str, hours: int) -> TimeEntry:
+    """Продлевает рабочий день идущей записи по подтверждению руководителя.
+
+    Входа по паролю в приложении нет (задание его не требует), поэтому
+    подтверждение — это записанное имя руководителя, а не проверка роли.
+    """
+    entry = db.get(TimeEntry, entry_id)
+    if entry is None:
+        raise EntryNotFound(f"Запись {entry_id} не найдена")
+    if entry.ended_at is not None:
+        raise NoRunningTimer("Запись уже закрыта — продлевать нечего")
+    if entry.limit_hours + hours > MAX_LIMIT_HOURS:
+        raise LimitTooHigh(f"Рабочий день нельзя продлить больше чем до {MAX_LIMIT_HOURS} часов")
+    entry.limit_hours += hours
+    entry.approved_by = approved_by
+    db.commit()
+    return entry
+
+
 def _seconds_between(start: datetime, end: datetime) -> int:
     return max(0, int((end - start).total_seconds()))
 
@@ -148,9 +196,11 @@ def _seconds_between(start: datetime, end: datetime) -> int:
 def entry_out(entry: TimeEntry, now: datetime) -> EntryOut:
     """Запись для ответа; длительность идущего таймера — до текущего момента.
 
-    is_too_long — только для идущей записи: закрытую уже не «забыли».
+    is_too_long — только для идущей и не продлённой записи: закрытую уже
+    не «забыли», а продлённую подтвердил руководитель.
     """
-    end = entry.ended_at if entry.ended_at is not None else now
+    running = entry.ended_at is None
+    end = entry.ended_at if not running else now
     duration = _seconds_between(entry.started_at, end)
     return EntryOut(
         id=entry.id,
@@ -161,7 +211,14 @@ def entry_out(entry: TimeEntry, now: datetime) -> EntryOut:
         kind=entry.kind,
         is_running=entry.ended_at is None,
         duration_seconds=duration,
-        is_too_long=entry.ended_at is None and duration >= LONG_RUNNING_HOURS * 3600,
+        is_too_long=running and entry.approved_by is None and duration >= LONG_RUNNING_HOURS * 3600,
+        limit_hours=entry.limit_hours,
+        stops_at=entry.started_at + timedelta(hours=entry.limit_hours) if running else None,
+        approved_by=entry.approved_by,
+        auto_stopped=entry.auto_stopped,
+        corrected=entry.corrected,
+        correction_note=entry.correction_note,
+        needs_review=entry.auto_stopped and not entry.corrected,
     )
 
 

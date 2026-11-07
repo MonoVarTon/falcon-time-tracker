@@ -7,7 +7,7 @@ Pydantic проверяет входящие данные до того, как 
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, StringConstraints, model_validator
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, model_validator
 
 from app.models import DESCRIPTION_MAX_LENGTH, NAME_MAX_LENGTH
 
@@ -46,6 +46,13 @@ class TimerStart(TimerSwitch):
         return self
 
 
+class TimerExtend(BaseModel):
+    """Продление рабочего дня: кто из руководителей подтвердил и на сколько часов."""
+
+    approved_by: Name
+    hours: int = Field(ge=1, le=12)
+
+
 class EntryOut(BaseModel):
     """Одна запись времени в ответе."""
 
@@ -57,7 +64,14 @@ class EntryOut(BaseModel):
     ended_at: AwareDatetime | None
     is_running: bool
     duration_seconds: int  # для идущего таймера — до текущего момента
-    is_too_long: bool  # идёт дольше порога — похоже, забыли нажать «Закончить»
+    is_too_long: bool  # идёт дольше порога и не продлён — похоже, забыли нажать «Закончить»
+    limit_hours: int  # через столько часов от начала запись закроется сама
+    stops_at: AwareDatetime | None  # когда закроется сама (только для идущей)
+    approved_by: str | None  # руководитель, продливший рабочий день
+    auto_stopped: bool  # закрыта автоматически
+    corrected: bool  # время окончания исправлено вручную
+    correction_note: str | None
+    needs_review: bool  # закрыта автоматически и ещё не исправлена — время надо уточнить
 
 
 class DaySummary(BaseModel):

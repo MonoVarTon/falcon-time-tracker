@@ -98,6 +98,11 @@
              background: #fdecea; color: #7a1a12; border-radius: 6px; font-size: 14px; }
   .warning-icon { font-weight: 600; }
   .flag { color: #7a1a12; font-weight: 500; }
+  .warning-body { display: flex; flex-direction: column; gap: 8px; }
+  .warning button.ghost { align-self: flex-start; background: #fff; }
+  form.extend { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  form.extend select { font: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; background: #fff; }
+  .note { color: var(--muted); font-size: 14px; margin: 8px 0 0; }
 
   /* Лента дня */
   .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--muted); margin-top: 14px; }
@@ -300,7 +305,11 @@ function renderEmployee(employee, fetchedAt) {
     actions.append(stop);
     row.append(clockBox, el("span", { class: "task" }, working ? entry.description : "работа на паузе"), actions);
     item.append(row);
-    if (entry.is_too_long) item.append(longTimerWarning(entry));
+    if (entry.is_too_long) item.append(longTimerWarning(entry, error));
+    if (entry.approved_by) {
+      item.append(el("p", { class: "note" },
+        `Рабочий день продлён до ${clockTime(new Date(entry.stops_at))}, подтвердил(а): ${entry.approved_by}`));
+    }
     item.append(dayLine(employee.today, false));
   } else {
     const form = el("form", { class: "inline" });
@@ -323,12 +332,43 @@ function renderEmployee(employee, fetchedAt) {
 }
 
 // Предупреждение «таймер идёт слишком долго» — похоже, забыли нажать «Закончить».
-function longTimerWarning(entry) {
-  const box = el("p", { class: "warning", role: "status" });
-  box.append(el("span", { class: "warning-icon", "aria-hidden": "true" }, "⚠"),
-             el("span", {}, `Таймер идёт с ${formatTime(entry.started_at)} — больше 10 часов. ` +
-                           "Возможно, забыли нажать «Закончить»."));
+// Плюс кнопка продления: если сотрудник правда задерживается, руководитель
+// подтверждает — иначе через 12 часов таймер остановится сам.
+function longTimerWarning(entry, errorNode) {
+  const box = el("div", { class: "warning", role: "status" });
+  const body = el("div", { class: "warning-body" });
+  body.append(el("span", {}, `Таймер идёт с ${formatTime(entry.started_at)} — больше 10 часов. ` +
+                            "Возможно, забыли нажать «Закончить». " +
+                            `Если не продлить, он остановится сам в ${clockTime(new Date(entry.stops_at))}.`));
+  const open = el("button", { type: "button", class: "ghost" }, "Продлить рабочий день");
+  open.addEventListener("click", () => {
+    open.replaceWith(extendForm(entry, errorNode));
+  });
+  body.append(open);
+  box.append(el("span", { class: "warning-icon", "aria-hidden": "true" }, "⚠"), body);
   return box;
+}
+
+// Форма продления: имя руководителя и на сколько часов.
+// Входа по паролю нет (задание его не требует) — поэтому подтверждение
+// записывается именем, а не проверкой роли. В настоящей системе нужен вход.
+function extendForm(entry, errorNode) {
+  const form = el("form", { class: "extend" });
+  const who = el("input", { type: "text", placeholder: "Имя руководителя", maxlength: "100",
+                            "aria-label": "Имя руководителя", required: "" });
+  const hours = el("select", { "aria-label": "На сколько продлить" });
+  for (const h of [2, 4, 6]) {
+    if (entry.limit_hours + h <= 24) hours.append(el("option", { value: String(h) }, `+${h} ч`));
+  }
+  const confirm = el("button", { type: "submit", class: "start" }, "Подтвердить продление");
+  form.append(who, hours, confirm);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    act(confirm, errorNode, () => api("POST", `/api/entries/${entry.id}/extend`,
+                                       { approved_by: who.value, hours: Number(hours.value) }));
+  });
+  setTimeout(() => who.focus(), 0);
+  return form;
 }
 
 // Строка итогов дня под сотрудником.
@@ -510,6 +550,11 @@ function renderReport(report, start, end, now) {
         const li = el("li", {}, `${formatTime(entry.started_at)} – ${end} · ${what}`);
         if (entry.is_running) li.append(" ", el("span", { class: "live" }, "(идёт)"));
         if (entry.is_too_long) li.append(" ", el("span", { class: "flag" }, "⚠ больше 10 ч — проверьте"));
+        if (entry.needs_review) {
+          li.append(" ", el("span", { class: "flag" },
+            `⏹ остановлен автоматически через ${entry.limit_hours} ч — уточните время`));
+        }
+        if (entry.approved_by) li.append(" ", el("span", { class: "count" }, `продлено, подтвердил(а): ${entry.approved_by}`));
         ul.append(li);
       }
       details.append(ul);

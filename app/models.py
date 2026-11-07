@@ -1,7 +1,7 @@
 """Таблицы базы данных: сотрудники и записи рабочего времени."""
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, String
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -16,6 +16,12 @@ KIND_WORK = "work"
 KIND_BREAK = "break"
 KIND_LUNCH = "lunch"
 ENTRY_KINDS = (KIND_WORK, KIND_BREAK, KIND_LUNCH)
+
+# Через столько часов идущий таймер останавливается сам (если не продлён).
+DEFAULT_LIMIT_HOURS = 12
+# Больше суток рабочий день не продлевается.
+MAX_LIMIT_HOURS = 24
+NOTE_MAX_LENGTH = 200
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -71,6 +77,13 @@ class TimeEntry(Base):
     description: Mapped[str] = mapped_column(String(DESCRIPTION_MAX_LENGTH))
     # server_default нужен для обновления старой базы: существующие записи станут «работой».
     kind: Mapped[str] = mapped_column(String(10), default=KIND_WORK, server_default=KIND_WORK)
+    # Предел в часах, после которого запись закрывается сама; руководитель может продлить.
+    limit_hours: Mapped[int] = mapped_column(default=DEFAULT_LIMIT_HOURS, server_default=str(DEFAULT_LIMIT_HOURS))
+    approved_by: Mapped[str | None] = mapped_column(String(NAME_MAX_LENGTH), default=None)  # кто продлил
+    auto_stopped: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Исправлено вручную (время окончания поставлено задним числом) и почему.
+    corrected: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    correction_note: Mapped[str | None] = mapped_column(String(NOTE_MAX_LENGTH), default=None)
     started_at: Mapped[datetime] = mapped_column(UTCDateTime())
     ended_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
 
