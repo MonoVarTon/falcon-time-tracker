@@ -68,6 +68,13 @@
   .clock.kind-break, .person.kind-break .status { color: var(--break); }
   .clock.kind-lunch, .person.kind-lunch .status { color: var(--lunch); }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .clock-box { display: flex; flex-direction: column; }
+  .clock-label { font-size: 13px; color: var(--muted); }
+  .clock.frozen { color: var(--muted); }   /* работа на паузе: часы стоят */
+  .pause-clock { font-size: 15px; font-variant-numeric: tabular-nums; }
+  .pause-clock.kind-break { color: var(--break); }
+  .pause-clock.kind-lunch { color: var(--lunch); }
+  .day-line { font-size: 14px; color: var(--muted); margin: 6px 0 0; }
   .pauses { display: block; font-size: 13px; color: var(--muted); }
 
   /* Отчёт */
@@ -178,8 +185,15 @@ async function api(method, url, body) {
 
 // ---------- Сотрудники ----------
 
+// Местная полночь: от неё сервер считает «отработано сегодня».
+function localMidnightISO() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+}
+
 async function loadEmployees() {
-  const employees = await api("GET", "/api/employees");
+  const params = new URLSearchParams({ since: localMidnightISO() });
+  const employees = await api("GET", `/api/employees?${params}`);
   const fetchedAt = Date.now();
   const list = $("people");
   list.replaceChildren();
@@ -209,8 +223,23 @@ function renderEmployee(employee, fetchedAt) {
 
   if (entry) {
     const row = el("div", { class: "running-row" });
-    const clock = el("span", { class: `clock kind-${entry.kind}`, "aria-live": "off" },
-                     formatClock(entry.duration_seconds));
+    // Большие часы — «отработано сегодня»: сумма всей работы за день.
+    // Во время перерыва и обеда они стоят (рабочее время не идёт).
+    const working = entry.kind === "work";
+    const clockBox = el("div", { class: "clock-box" });
+    const clock = el("span", { class: working ? "clock" : "clock frozen", "aria-live": "off" },
+                     formatClock(employee.today.work_seconds));
+    clockBox.append(el("span", { class: "clock-label" }, "отработано сегодня"), clock);
+    if (working) {
+      running.push({ element: clock, baseSeconds: employee.today.work_seconds, fetchedAt });
+    } else {
+      // Пока идёт перерыв или обед — его собственные маленькие часы.
+      const pauseClock = el("span", { class: `pause-clock kind-${entry.kind}` },
+                            `${KIND_LABEL[entry.kind]}: ${formatClock(entry.duration_seconds)}`);
+      clockBox.append(pauseClock);
+      running.push({ element: pauseClock, baseSeconds: entry.duration_seconds, fetchedAt,
+                     prefix: `${KIND_LABEL[entry.kind]}: ` });
+    }
     const actions = el("div", { class: "actions" });
     // Кнопка переключения: закрывает текущую запись и сразу открывает новую.
     const switchButton = (label, kind, cls) => {
@@ -228,15 +257,18 @@ function renderEmployee(employee, fetchedAt) {
     stop.addEventListener("click", () => act(stop, error, () =>
       api("POST", `/api/employees/${employee.id}/timer/stop`)));
     actions.append(stop);
-    row.append(clock, el("span", { class: "task" }, entry.description), actions);
+    row.append(clockBox, el("span", { class: "task" }, working ? entry.description : "работа на паузе"), actions);
     item.append(row);
-    running.push({ element: clock, baseSeconds: entry.duration_seconds, fetchedAt });
+    item.append(dayLine(employee.today, false));
   } else {
     const form = el("form", { class: "inline" });
     const input = el("input", { type: "text", placeholder: "Над чем работаете?", maxlength: "500",
                                 "aria-label": `Задача для: ${employee.name}`, required: "" });
     const start = el("button", { type: "submit", class: "start" }, "Начать работу");
     form.append(input, start);
+    if (employee.today.work_seconds || employee.today.break_seconds || employee.today.lunch_seconds) {
+      item.append(dayLine(employee.today, true));
+    }
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       act(start, error, () => api("POST", `/api/employees/${employee.id}/timer/start`,
@@ -246,6 +278,16 @@ function renderEmployee(employee, fetchedAt) {
   }
   item.append(error);
   return item;
+}
+
+// Строка итогов дня под сотрудником.
+function dayLine(today, withWork) {
+  const parts = [];
+  if (withWork) parts.push(`сегодня отработано ${formatHours(today.work_seconds)}`);
+  if (today.break_seconds) parts.push(`перерывы ${formatHours(today.break_seconds)}`);
+  if (today.lunch_seconds) parts.push(`обед ${formatHours(today.lunch_seconds)}`);
+  const line = el("p", { class: "day-line" }, parts.length ? (withWork ? "" : "сегодня: ") + parts.join(", ") : "");
+  return line;
 }
 
 // Общая обёртка для кнопок: блокируем на время запроса, показываем ошибку, обновляем экран.
@@ -281,7 +323,8 @@ $("add-form").addEventListener("submit", async (event) => {
 setInterval(() => {
   const now = Date.now();
   for (const timer of running) {
-    timer.element.textContent = formatClock(timer.baseSeconds + Math.floor((now - timer.fetchedAt) / 1000));
+    const seconds = timer.baseSeconds + Math.floor((now - timer.fetchedAt) / 1000);
+    timer.element.textContent = (timer.prefix || "") + formatClock(seconds);
   }
 }, 1000);
 

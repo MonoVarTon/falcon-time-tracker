@@ -59,12 +59,21 @@ class EntryOut(BaseModel):
     duration_seconds: int  # для идущего таймера — до текущего момента
 
 
+class DaySummary(BaseModel):
+    """Итоги дня сотрудника: сколько работы, перерывов и обеда с начала суток."""
+
+    work_seconds: int
+    break_seconds: int
+    lunch_seconds: int
+
+
 class EmployeeOut(BaseModel):
-    """Сотрудник и его идущий таймер, если есть."""
+    """Сотрудник, его идущий таймер (если есть) и итоги дня."""
 
     id: int
     name: str
     active_entry: EntryOut | None
+    today: DaySummary
 
 
 class EmployeeReport(BaseModel):

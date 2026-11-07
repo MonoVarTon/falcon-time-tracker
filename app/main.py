@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import services
 from app.db import engine, get_db, init_db
-from app.schemas import EmployeeCreate, EmployeeOut, EntryOut, ReportOut, TimerStart, TimerSwitch
+from app.schemas import DaySummary, EmployeeCreate, EmployeeOut, EntryOut, ReportOut, TimerStart, TimerSwitch
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -57,12 +57,25 @@ async def _conflict(_request: Request, error: Exception) -> JSONResponse:
 def add_employee(body: EmployeeCreate, db: Session = Depends(get_db)) -> EmployeeOut:
     """Добавить сотрудника."""
     employee = services.create_employee(db, body.name)
-    return EmployeeOut(id=employee.id, name=employee.name, active_entry=None)
+    empty_day = DaySummary(work_seconds=0, break_seconds=0, lunch_seconds=0)
+    return EmployeeOut(id=employee.id, name=employee.name, active_entry=None, today=empty_day)
 
 
 @app.get("/api/employees", response_model=list[EmployeeOut])
-def employees(db: Session = Depends(get_db), now: datetime = Depends(get_now)) -> list[EmployeeOut]:
-    """Список сотрудников с их идущими таймерами."""
+def employees(
+    since: AwareDatetime | None = Query(
+        default=None, description="Начало «сегодня» у пользователя (местная полночь), с часовым поясом"
+    ),
+    db: Session = Depends(get_db),
+    now: datetime = Depends(get_now),
+) -> list[EmployeeOut]:
+    """Список сотрудников: идущий таймер и итоги дня («отработано сегодня»).
+
+    Сервер не знает, в каком поясе пользователь, поэтому начало суток
+    присылает страница. Без него считаем с полуночи UTC.
+    """
+    day_start = since if since is not None else now.replace(hour=0, minute=0, second=0, microsecond=0)
+    summaries = services.day_summaries(db, day_start, now)
     result = []
     for employee in services.list_employees(db):
         running = services.get_running_entry(db, employee.id)
@@ -70,6 +83,7 @@ def employees(db: Session = Depends(get_db), now: datetime = Depends(get_now)) -
             id=employee.id,
             name=employee.name,
             active_entry=services.entry_out(running, now) if running else None,
+            today=summaries[employee.id],
         ))
     return result
 

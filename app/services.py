@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, Employee, TimeEntry
-from app.schemas import EmployeeReport, EntryOut, ReportOut
+from app.schemas import DaySummary, EmployeeReport, EntryOut, ReportOut
 
 
 class EmployeeNotFound(Exception):
@@ -157,6 +157,50 @@ def entry_out(entry: TimeEntry, now: datetime) -> EntryOut:
     )
 
 
+def _entries_overlapping(db: Session, start: datetime, end: datetime) -> list[TimeEntry]:
+    """Записи, которые хоть частично попадают в отрезок [start, end)."""
+    return list(db.scalars(
+        select(TimeEntry)
+        .where(
+            TimeEntry.started_at < end,
+            (TimeEntry.ended_at.is_(None)) | (TimeEntry.ended_at > start),
+        )
+        .order_by(TimeEntry.started_at)
+    ))
+
+
+def _seconds_by_kind(entries: list[TimeEntry], start: datetime, end: datetime, now: datetime) -> dict[str, int]:
+    """Сколько секунд работы, перерывов и обеда внутри отрезка [start, end).
+
+    Единое правило подсчёта для отчёта и для «отработано сегодня»:
+    считается только часть записи внутри отрезка, идущая запись — до now.
+    """
+    totals = {KIND_WORK: 0, KIND_BREAK: 0, KIND_LUNCH: 0}
+    for entry in entries:
+        entry_end = entry.ended_at if entry.ended_at is not None else now
+        totals[entry.kind] += _seconds_between(max(entry.started_at, start), min(entry_end, end))
+    return totals
+
+
+def day_summaries(db: Session, since: datetime, now: datetime) -> dict[int, DaySummary]:
+    """Итоги дня каждого сотрудника: с начала суток (since) до текущего момента.
+
+    Нужны, чтобы на экране было видно «отработано сегодня» целиком,
+    а не только текущий отрезок, который начинается заново после обеда.
+    """
+    entries = _entries_overlapping(db, since, now)
+    result = {}
+    for employee in list_employees(db):
+        own = [e for e in entries if e.employee_id == employee.id]
+        totals = _seconds_by_kind(own, since, now, now)
+        result[employee.id] = DaySummary(
+            work_seconds=totals[KIND_WORK],
+            break_seconds=totals[KIND_BREAK],
+            lunch_seconds=totals[KIND_LUNCH],
+        )
+    return result
+
+
 def build_report(db: Session, start: datetime, end: datetime, now: datetime) -> ReportOut:
     """Отчёт за период [start, end): записи и сумма по каждому сотруднику.
 
@@ -168,22 +212,12 @@ def build_report(db: Session, start: datetime, end: datetime, now: datetime) -> 
     - работа, перерывы и обед считаются отдельно: total_seconds — только работа;
     - сотрудники без записей тоже показываются — с нулём.
     """
-    entries = db.scalars(
-        select(TimeEntry)
-        .where(
-            TimeEntry.started_at < end,
-            (TimeEntry.ended_at.is_(None)) | (TimeEntry.ended_at > start),
-        )
-        .order_by(TimeEntry.started_at)
-    ).all()
+    entries = _entries_overlapping(db, start, end)
 
     rows: list[EmployeeReport] = []
     for employee in list_employees(db):
         own = [e for e in entries if e.employee_id == employee.id]
-        by_kind = {KIND_WORK: 0, KIND_BREAK: 0, KIND_LUNCH: 0}
-        for entry in own:
-            entry_end = entry.ended_at if entry.ended_at is not None else now
-            by_kind[entry.kind] += _seconds_between(max(entry.started_at, start), min(entry_end, end))
+        by_kind = _seconds_by_kind(own, start, end, now)
         rows.append(EmployeeReport(
             employee_id=employee.id,
             name=employee.name,
