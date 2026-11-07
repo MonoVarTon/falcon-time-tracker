@@ -30,6 +30,9 @@ class MissingDescription(Exception):
     """Вернуться к работе нельзя: нет ни новой задачи, ни прошлой."""
 
 
+# Таймер, идущий дольше этого, скорее всего забыли выключить.
+LONG_RUNNING_HOURS = 10
+
 # Описания по умолчанию: у перерыва и обеда задачу вписывать не нужно.
 DEFAULT_DESCRIPTIONS = {KIND_BREAK: "Перерыв", KIND_LUNCH: "Обед"}
 
@@ -143,8 +146,12 @@ def _seconds_between(start: datetime, end: datetime) -> int:
 
 
 def entry_out(entry: TimeEntry, now: datetime) -> EntryOut:
-    """Запись для ответа; длительность идущего таймера — до текущего момента."""
+    """Запись для ответа; длительность идущего таймера — до текущего момента.
+
+    is_too_long — только для идущей записи: закрытую уже не «забыли».
+    """
     end = entry.ended_at if entry.ended_at is not None else now
+    duration = _seconds_between(entry.started_at, end)
     return EntryOut(
         id=entry.id,
         employee_id=entry.employee_id,
@@ -153,7 +160,8 @@ def entry_out(entry: TimeEntry, now: datetime) -> EntryOut:
         ended_at=entry.ended_at,
         kind=entry.kind,
         is_running=entry.ended_at is None,
-        duration_seconds=_seconds_between(entry.started_at, end),
+        duration_seconds=duration,
+        is_too_long=entry.ended_at is None and duration >= LONG_RUNNING_HOURS * 3600,
     )
 
 

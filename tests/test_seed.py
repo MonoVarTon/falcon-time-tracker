@@ -66,6 +66,8 @@ def test_seeded_week_looks_like_real_work(session: Session) -> None:
     report = build_report(session, monday, monday + timedelta(days=2), NOW)  # пн и вт — полные дни
 
     for row in report.employees:
+        if row.name == "Глеб Сорокин":
+            continue  # у него забытый таймер со вторника — время раздуто, ради этого он и есть
         assert 2 * 6 * 3600 <= row.total_seconds <= 2 * 9 * 3600, row.name
         assert row.lunch_seconds >= 2 * 30 * 60, row.name
 

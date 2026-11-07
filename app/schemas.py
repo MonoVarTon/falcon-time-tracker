@@ -57,6 +57,7 @@ class EntryOut(BaseModel):
     ended_at: AwareDatetime | None
     is_running: bool
     duration_seconds: int  # для идущего таймера — до текущего момента
+    is_too_long: bool  # идёт дольше порога — похоже, забыли нажать «Закончить»
 
 
 class DaySummary(BaseModel):

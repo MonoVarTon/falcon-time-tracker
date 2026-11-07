@@ -93,6 +93,12 @@
   .live { color: var(--run); }
   .count { display: block; font-size: 13px; color: var(--muted); }
 
+  /* «Забытый таймер» — служебное предупреждение: значок + текст, не только цвет */
+  .warning { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 0; padding: 8px 10px;
+             background: #fdecea; color: #7a1a12; border-radius: 6px; font-size: 14px; }
+  .warning-icon { font-weight: 600; }
+  .flag { color: #7a1a12; font-weight: 500; }
+
   /* Лента дня */
   .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--muted); margin-top: 14px; }
   .legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px;
@@ -294,6 +300,7 @@ function renderEmployee(employee, fetchedAt) {
     actions.append(stop);
     row.append(clockBox, el("span", { class: "task" }, working ? entry.description : "работа на паузе"), actions);
     item.append(row);
+    if (entry.is_too_long) item.append(longTimerWarning(entry));
     item.append(dayLine(employee.today, false));
   } else {
     const form = el("form", { class: "inline" });
@@ -313,6 +320,15 @@ function renderEmployee(employee, fetchedAt) {
   }
   item.append(error);
   return item;
+}
+
+// Предупреждение «таймер идёт слишком долго» — похоже, забыли нажать «Закончить».
+function longTimerWarning(entry) {
+  const box = el("p", { class: "warning", role: "status" });
+  box.append(el("span", { class: "warning-icon", "aria-hidden": "true" }, "⚠"),
+             el("span", {}, `Таймер идёт с ${formatTime(entry.started_at)} — больше 10 часов. ` +
+                           "Возможно, забыли нажать «Закончить»."));
+  return box;
 }
 
 // Строка итогов дня под сотрудником.
@@ -493,6 +509,7 @@ function renderReport(report, start, end, now) {
         const what = KIND_LABEL[entry.kind] || entry.description;
         const li = el("li", {}, `${formatTime(entry.started_at)} – ${end} · ${what}`);
         if (entry.is_running) li.append(" ", el("span", { class: "live" }, "(идёт)"));
+        if (entry.is_too_long) li.append(" ", el("span", { class: "flag" }, "⚠ больше 10 ч — проверьте"));
         ul.append(li);
       }
       details.append(ul);

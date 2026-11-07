@@ -86,6 +86,7 @@ def _today(employees: list[Employee], now: datetime) -> list[TimeEntry]:
 
     a, b, c, d, e = employees
     t = DEMO_TASKS
+    # Глеб сегодня ещё не пришёл: вчера он забыл нажать «Закончить» (см. seed()).
     return [
         # Алина: утро с перерывом, сейчас снова работает
         _entry(a, KIND_WORK, t[0][0], ago(180), ago(100)),
@@ -96,8 +97,6 @@ def _today(employees: list[Employee], now: datetime) -> list[TimeEntry]:
         _entry(b, KIND_LUNCH, "", ago(20), None),
         # Вера: пришла позже, работает
         _entry(c, KIND_WORK, t[2][0], ago(75), None),
-        # Глеб: короткий день, уже закончил
-        _entry(d, KIND_WORK, t[3][0], ago(240), ago(60)),
         # Дина: на перерыве
         _entry(e, KIND_WORK, t[4][0], ago(120), ago(8)),
         _entry(e, KIND_BREAK, "", ago(8), None),
@@ -116,9 +115,16 @@ def seed(db: Session, now: datetime, append: bool = False) -> int:
     db.add_all(employees)
     db.flush()  # нужны id сотрудников для записей
 
+    last_day: list[TimeEntry] = []
     for day in _past_workdays(now.date(), PAST_WORKDAYS):
         for employee, tasks in zip(employees, DEMO_TASKS):
-            db.add_all(_full_day(rng, employee, tasks, day, now.tzinfo))
+            entries = _full_day(rng, employee, tasks, day, now.tzinfo)
+            db.add_all(entries)
+            if employee is employees[3]:
+                last_day = entries
+    # «Забытый таймер»: в последний рабочий день Глеб не нажал «Закончить» —
+    # его последняя запись так и идёт. Так в демо сразу видно предупреждение.
+    last_day[-1].ended_at = None
     db.add_all(_today(employees, now))
     db.commit()
     return len(employees)
