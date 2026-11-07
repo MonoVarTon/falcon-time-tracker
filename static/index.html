@@ -103,6 +103,14 @@
   form.extend { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   form.extend select { font: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; background: #fff; }
   .note { color: var(--muted); font-size: 14px; margin: 8px 0 0; }
+  .warning-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .edited { display: block; font-size: 13px; color: var(--muted); font-style: italic; }
+  button.small { padding: 3px 10px; font-size: 13px; margin-left: 6px; }
+  .review-banner { margin: 12px 0 0; padding: 8px 10px; border-radius: 6px; background: #fdecea; color: #7a1a12; font-size: 14px; }
+  .review-title { margin: 0 0 6px; font-weight: 500; }
+  .review-line { margin: 4px 0; }
+  .review-banner .correction .note { color: #7a1a12; }
+  .correction { margin-top: 6px; }
 
   /* Лента дня */
   .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--muted); margin-top: 14px; }
@@ -340,11 +348,13 @@ function longTimerWarning(entry, errorNode) {
   body.append(el("span", {}, `Таймер идёт с ${formatTime(entry.started_at)} — больше 10 часов. ` +
                             "Возможно, забыли нажать «Закончить». " +
                             `Если не продлить, он остановится сам в ${clockTime(new Date(entry.stops_at))}.`));
+  const actions = el("div", { class: "warning-actions" });
   const open = el("button", { type: "button", class: "ghost" }, "Продлить рабочий день");
-  open.addEventListener("click", () => {
-    open.replaceWith(extendForm(entry, errorNode));
-  });
-  body.append(open);
+  open.addEventListener("click", () => actions.replaceWith(extendForm(entry, errorNode)));
+  const fix = el("button", { type: "button", class: "ghost" }, "Исправить время окончания");
+  fix.addEventListener("click", () => actions.replaceWith(correctionForm(entry, errorNode)));
+  actions.append(open, fix);
+  body.append(actions);
   box.append(el("span", { class: "warning-icon", "aria-hidden": "true" }, "⚠"), body);
   return box;
 }
@@ -369,6 +379,47 @@ function extendForm(entry, errorNode) {
   });
   setTimeout(() => who.focus(), 0);
   return form;
+}
+
+// Значение для поля datetime-local — местное время без пояса: «2026-11-07T18:05».
+function toLocalInput(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// Форма исправления времени окончания. Сервер подсказывает обычное время ухода
+// сотрудника (среднее за 7 дней); его можно принять или поставить своё.
+function correctionForm(entry, errorNode) {
+  const box = el("div", { class: "correction" });
+  const hint = el("p", { class: "note" }, "Подбираю подсказку…");
+  const form = el("form", { class: "extend" });
+  const when = el("input", { type: "datetime-local", "aria-label": "Время окончания", required: "" });
+  const note = el("input", { type: "text", placeholder: "Причина (необязательно)", maxlength: "200",
+                             "aria-label": "Причина исправления" });
+  const save = el("button", { type: "submit", class: "start" }, "Сохранить время");
+  form.append(when, note, save);
+  box.append(hint, form);
+
+  // Смещение пояса: сервер сам его не знает, а «сутки» и «обычное время» — местные.
+  const offset = -new Date().getTimezoneOffset();
+  api("GET", `/api/entries/${entry.id}/suggested-end?utc_offset_minutes=${offset}`)
+    .then((suggestion) => {
+      hint.textContent = suggestion.explanation;
+      if (suggestion.suggested_end) {
+        when.value = toLocalInput(new Date(suggestion.suggested_end));
+        note.value = "по среднему времени ухода";
+      }
+    })
+    .catch((error) => { hint.textContent = error.message; });
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    // datetime-local — местное время; new Date() так его и понимает, toISOString переводит в UTC.
+    act(save, errorNode, () => api("POST", `/api/entries/${entry.id}/correct`,
+                                   { ended_at: new Date(when.value).toISOString(), note: note.value.trim() || null }));
+  });
+  setTimeout(() => when.focus(), 0);
+  return box;
 }
 
 // Строка итогов дня под сотрудником.
@@ -506,6 +557,25 @@ function renderReport(report, start, end, now) {
   if (report.total_seconds === 0) {
     box.append(el("p", { class: "empty" }, "За этот период записей нет — у всех ноль."));
   }
+  // Начальник не должен пропустить записи, которые остановились сами, —
+  // и не должен искать их в длинном списке: кнопки «Исправить» прямо здесь.
+  const toReview = report.employees.flatMap((row) =>
+    row.entries.filter((e) => e.needs_review).map((entry) => ({ entry, name: row.name })));
+  if (toReview.length) {
+    const banner = el("div", { class: "review-banner", role: "status" });
+    const n = toReview.length;
+    banner.append(el("p", { class: "review-title" },
+      `⏹ ${n} ${plural(n, "запись остановлена", "записи остановлены", "записей остановлено")} автоматически — уточните время:`));
+    for (const { entry, name } of toReview) {
+      const line = el("div", { class: "review-line" });
+      const fix = el("button", { type: "button", class: "ghost small" }, "Исправить");
+      const lineError = el("p", { class: "error", role: "alert" });
+      fix.addEventListener("click", () => fix.replaceWith(correctionForm(entry, lineError)));
+      line.append(el("span", {}, `${name}, ${formatTime(entry.started_at)} — ${entry.description}`), fix, lineError);
+      banner.append(line);
+    }
+    box.append(banner);
+  }
   // Общая шкала часов для всех сотрудников — чтобы полосы можно было сравнивать.
   const allEntries = report.employees.flatMap((row) => row.entries);
   const scale = buildLanes(allEntries, start, end, now);
@@ -553,7 +623,12 @@ function renderReport(report, start, end, now) {
         if (entry.needs_review) {
           li.append(" ", el("span", { class: "flag" },
             `⏹ остановлен автоматически через ${entry.limit_hours} ч — уточните время`));
+          const fix = el("button", { type: "button", class: "ghost small" }, "Исправить");
+          const liError = el("p", { class: "error", role: "alert" });
+          fix.addEventListener("click", () => fix.replaceWith(correctionForm(entry, liError)));
+          li.append(fix, liError);
         }
+        if (entry.corrected) li.append(el("span", { class: "edited" }, `✎ исправлено: ${entry.correction_note}`));
         if (entry.approved_by) li.append(" ", el("span", { class: "count" }, `продлено, подтвердил(а): ${entry.approved_by}`));
         ul.append(li);
       }

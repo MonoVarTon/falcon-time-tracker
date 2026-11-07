@@ -4,14 +4,14 @@
 можно объяснить и проверить отдельно. Текущее время передаётся параметром
 (now), а не берётся внутри: так тесты могут «управлять часами».
 """
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, MAX_LIMIT_HOURS, Employee, TimeEntry
-from app.schemas import DaySummary, EmployeeReport, EntryOut, ReportOut
+from app.schemas import DaySummary, EmployeeReport, EntryOut, ReportOut, SuggestedEnd
 
 
 class EmployeeNotFound(Exception):
@@ -36,6 +36,15 @@ class EntryNotFound(Exception):
 
 class LimitTooHigh(Exception):
     """Продление сверх суток."""
+
+
+class InvalidCorrection(Exception):
+    """Исправленное время невозможно: раньше начала, в будущем или налезает на следующую запись."""
+
+
+# За сколько прошлых дней считаем обычное время ухода.
+SUGGESTION_DAYS = 7
+DEFAULT_CORRECTION_NOTE = "Время окончания исправлено вручную"
 
 
 # Таймер, идущий дольше этого, скорее всего забыли выключить.
@@ -176,15 +185,96 @@ def extend_limit(db: Session, entry_id: int, approved_by: str, hours: int) -> Ti
     Входа по паролю в приложении нет (задание его не требует), поэтому
     подтверждение — это записанное имя руководителя, а не проверка роли.
     """
-    entry = db.get(TimeEntry, entry_id)
-    if entry is None:
-        raise EntryNotFound(f"Запись {entry_id} не найдена")
+    entry = _get_entry(db, entry_id)
     if entry.ended_at is not None:
         raise NoRunningTimer("Запись уже закрыта — продлевать нечего")
     if entry.limit_hours + hours > MAX_LIMIT_HOURS:
         raise LimitTooHigh(f"Рабочий день нельзя продлить больше чем до {MAX_LIMIT_HOURS} часов")
     entry.limit_hours += hours
     entry.approved_by = approved_by
+    db.commit()
+    return entry
+
+
+def _get_entry(db: Session, entry_id: int) -> TimeEntry:
+    entry = db.get(TimeEntry, entry_id)
+    if entry is None:
+        raise EntryNotFound(f"Запись {entry_id} не найдена")
+    return entry
+
+
+def _days_word(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "дню"
+    return "дням"
+
+
+def suggest_end(db: Session, entry_id: int, utc_offset_minutes: int, now: datetime) -> SuggestedEnd:
+    """Подсказка для исправления: среднее время ухода сотрудника за прошлые 7 дней.
+
+    «Уход» — конец последней записи дня. Сутки считаются по местному времени
+    пользователя (смещение от UTC присылает страница). В среднее НЕ идут
+    автоостановленные и уже исправленные записи: это догадки, а не факты —
+    иначе подсказка начала бы подтверждать сама себя.
+    """
+    entry = _get_entry(db, entry_id)
+    local = timezone(timedelta(minutes=utc_offset_minutes))
+    entry_day = entry.started_at.astimezone(local).date()
+    day_start = datetime.combine(entry_day, time(0), tzinfo=local)
+    history = db.scalars(
+        select(TimeEntry).where(
+            TimeEntry.employee_id == entry.employee_id,
+            TimeEntry.ended_at.is_not(None),
+            TimeEntry.auto_stopped.is_(False),
+            TimeEntry.corrected.is_(False),
+            TimeEntry.ended_at >= day_start - timedelta(days=SUGGESTION_DAYS),
+            TimeEntry.ended_at < day_start,
+        )
+    ).all()
+
+    last_leave: dict = {}  # местная дата → время последнего окончания в этот день
+    for past in history:
+        ended = past.ended_at.astimezone(local)
+        if ended.date() not in last_leave or ended > last_leave[ended.date()]:
+            last_leave[ended.date()] = ended
+    days = len(last_leave)
+    if not days:
+        return SuggestedEnd(suggested_end=None, based_on_days=0,
+                            explanation="Нет истории за последние 7 дней — укажите время вручную")
+
+    minutes = [t.hour * 60 + t.minute + t.second / 60 for t in last_leave.values()]
+    suggested = day_start + timedelta(minutes=round(sum(minutes) / days))
+    usual = f"Обычно уходит в {suggested:%H:%M} — среднее по {days} {_days_word(days)}"
+    if suggested <= entry.started_at:
+        return SuggestedEnd(suggested_end=None, based_on_days=days,
+                            explanation=f"{usual}, но эта запись началась позже — укажите время вручную")
+    if suggested > now:
+        return SuggestedEnd(suggested_end=None, based_on_days=days,
+                            explanation=f"{usual}, но это время ещё не наступило — укажите вручную")
+    return SuggestedEnd(suggested_end=suggested.astimezone(timezone.utc), based_on_days=days, explanation=usual)
+
+
+def correct_end(db: Session, entry_id: int, ended_at: datetime, note: str | None, now: datetime) -> TimeEntry:
+    """Ставит время окончания задним числом и помечает запись «исправлено».
+
+    Исправленное честно видно в отчёте: начальник отличает точные часы от
+    восстановленных. Нельзя: раньше начала, в будущем, поверх следующей записи.
+    """
+    entry = _get_entry(db, entry_id)
+    if ended_at <= entry.started_at:
+        raise InvalidCorrection("Окончание должно быть позже начала записи")
+    if ended_at > now:
+        raise InvalidCorrection("Это время ещё не наступило")
+    following = db.scalars(
+        select(TimeEntry)
+        .where(TimeEntry.employee_id == entry.employee_id, TimeEntry.started_at > entry.started_at)
+        .order_by(TimeEntry.started_at)
+    ).first()
+    if following is not None and ended_at > following.started_at:
+        raise InvalidCorrection("Выбранное время пересекается со следующей записью этого сотрудника")
+    entry.ended_at = ended_at
+    entry.corrected = True
+    entry.correction_note = note or DEFAULT_CORRECTION_NOTE
     db.commit()
     return entry
 

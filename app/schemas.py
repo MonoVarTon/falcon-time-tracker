@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, model_validator
 
-from app.models import DESCRIPTION_MAX_LENGTH, NAME_MAX_LENGTH
+from app.models import DESCRIPTION_MAX_LENGTH, NAME_MAX_LENGTH, NOTE_MAX_LENGTH
 
 # Строка без пробелов по краям, не пустая и не длиннее лимита базы.
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=NAME_MAX_LENGTH)]
@@ -51,6 +51,24 @@ class TimerExtend(BaseModel):
 
     approved_by: Name
     hours: int = Field(ge=1, le=12)
+
+
+Note = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=NOTE_MAX_LENGTH)]
+
+
+class EntryCorrect(BaseModel):
+    """Исправление времени окончания записи задним числом."""
+
+    ended_at: AwareDatetime
+    note: Note | None = None  # почему исправили; без причины — стандартная пометка
+
+
+class SuggestedEnd(BaseModel):
+    """Подсказка для исправления: обычное время ухода сотрудника."""
+
+    suggested_end: AwareDatetime | None  # None — подсказать нечего
+    based_on_days: int  # по скольким дням посчитано среднее
+    explanation: str  # человеческое объяснение для страницы
 
 
 class EntryOut(BaseModel):

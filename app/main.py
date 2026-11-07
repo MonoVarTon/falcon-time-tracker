@@ -21,8 +21,10 @@ from app.schemas import (
     DaySummary,
     EmployeeCreate,
     EmployeeOut,
+    EntryCorrect,
     EntryOut,
     ReportOut,
+    SuggestedEnd,
     TimerExtend,
     TimerStart,
     TimerSwitch,
@@ -63,7 +65,8 @@ async def _not_found(_request: Request, error: Exception) -> JSONResponse:
 
 
 @app.exception_handler(services.LimitTooHigh)
-async def _limit_too_high(_request: Request, error: services.LimitTooHigh) -> JSONResponse:
+@app.exception_handler(services.InvalidCorrection)
+async def _unprocessable(_request: Request, error: Exception) -> JSONResponse:
     return JSONResponse(status_code=422, content={"detail": str(error)})
 
 
@@ -144,6 +147,27 @@ def extend_entry(
 ) -> EntryOut:
     """Продлить рабочий день идущей записи — с подтверждением руководителя."""
     entry = services.extend_limit(db, entry_id, body.approved_by, body.hours)
+    return services.entry_out(entry, now)
+
+
+@app.get("/api/entries/{entry_id}/suggested-end", response_model=SuggestedEnd)
+def suggested_end(
+    entry_id: int,
+    utc_offset_minutes: int = Query(default=0, ge=-14 * 60, le=14 * 60,
+                                    description="Смещение пояса пользователя от UTC в минутах (Минск: 180)"),
+    db: Session = Depends(get_checked_db),
+    now: datetime = Depends(get_now),
+) -> SuggestedEnd:
+    """Подсказка для исправления: обычное время ухода за последние 7 дней."""
+    return services.suggest_end(db, entry_id, utc_offset_minutes, now)
+
+
+@app.post("/api/entries/{entry_id}/correct", response_model=EntryOut)
+def correct_entry(
+    entry_id: int, body: EntryCorrect, db: Session = Depends(get_checked_db), now: datetime = Depends(get_now)
+) -> EntryOut:
+    """Исправить время окончания записи — с пометкой «исправлено» в отчёте."""
+    entry = services.correct_end(db, entry_id, body.ended_at, body.note, now)
     return services.entry_out(entry, now)
 
 
