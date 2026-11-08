@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, Employee, TimeEntry
-from app.seed import DEMO_NAMES, SeedRefused, seed
+from app.seed import DEMO_NAMES, DEMO_TASKS, FORGETFUL, SeedRefused, seed
 from app.services import build_report
 
 # Среда, 11 ноября 2026, 12:30 по Минску — середина рабочего дня.
@@ -66,8 +66,8 @@ def test_seeded_week_looks_like_real_work(session: Session) -> None:
     report = build_report(session, monday, monday + timedelta(days=2), NOW)  # пн и вт — полные дни
 
     for row in report.employees:
-        if row.name == "Глеб Сорокин":
-            continue  # у него забытый таймер со вторника — время раздуто, ради этого он и есть
+        if row.name == DEMO_NAMES[FORGETFUL]:
+            continue  # забытый таймер — время раздуто, ради этого он и есть
         assert 2 * 6 * 3600 <= row.total_seconds <= 2 * 9 * 3600, row.name
         assert row.lunch_seconds >= 2 * 30 * 60, row.name
 
@@ -81,3 +81,11 @@ def test_today_shows_live_picture(session: Session) -> None:
     assert KIND_WORK in running_kinds
     assert set(running_kinds) & {KIND_BREAK, KIND_LUNCH}
     assert all(e <= NOW for e in session.scalars(select(TimeEntry.started_at)))  # ничего «из будущего»
+
+
+def test_demo_is_a_dispatch_office() -> None:
+    """Демо — диспетчерская: у каждого сотрудника свои задачи, есть работа с брокерами и водителями."""
+    all_tasks = [task for tasks in DEMO_TASKS for task in tasks]
+    assert len(DEMO_NAMES) == len(DEMO_TASKS)
+    assert any("брокер" in task for task in all_tasks)
+    assert any("водител" in task for task in all_tasks)

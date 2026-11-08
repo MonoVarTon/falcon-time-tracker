@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Employee
-from app.seed import seed
+from app.seed import DEMO_NAMES, FORGETFUL, seed
 from app.services import LONG_RUNNING_HOURS, get_running_entry
 from tests.helpers import FakeClock, add_employee
 from tests.test_seed import NOW
@@ -55,11 +55,11 @@ def test_long_break_is_flagged_too(client: TestClient, clock: FakeClock) -> None
 
 
 def test_demo_has_forgotten_timer(session: Session) -> None:
-    """В демо-данных Глеб вчера забыл нажать «Закончить» — предупреждение видно сразу."""
+    """В демо-данных один сотрудник забыл нажать «Закончить» — предупреждение видно сразу."""
     seed(session, NOW)
-    gleb = session.scalars(select(Employee).where(Employee.name == "Глеб Сорокин")).one()
+    forgetful = session.scalars(select(Employee).where(Employee.name == DEMO_NAMES[FORGETFUL])).one()
 
-    entry = get_running_entry(session, gleb.id)
+    entry = get_running_entry(session, forgetful.id)
 
     assert entry is not None
     assert NOW - entry.started_at > timedelta(hours=LONG_RUNNING_HOURS)
