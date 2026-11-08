@@ -113,7 +113,11 @@ def test_empty_report_without_employees(client: TestClient) -> None:
     response = client.get("/api/report", params=period(START, START + timedelta(days=1)))
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    # Сутки компании (Чикаго), которые задевает период 09:00–09:00 UTC: 7 и 8 ноября.
+    assert [d["date"] for d in body.pop("days")] == ["2026-11-07", "2026-11-08"]
+    assert body.pop("timezone") == "America/Chicago"
+    assert body == {
         "start": "2026-11-07T09:00:00Z",
         "end": "2026-11-08T09:00:00Z",
         "total_seconds": 0,
@@ -230,4 +234,4 @@ def test_page_is_served_and_script_is_not_cut(client: TestClient) -> None:
     # Закрывающий тег должен встречаться только один раз — в самом конце скрипта,
     # и уже после последней функции страницы.
     assert script.count(closing) == 1
-    assert script.index("loadEmployees().catch") < script.index(closing)
+    assert script.index("\nstart();") < script.index(closing)  # последняя строка — запуск страницы

@@ -31,6 +31,9 @@
   header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; margin-bottom: 28px; }
   h1 { font-size: 28px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
   .now-working { color: var(--muted); margin: 0; }
+  .header-side { text-align: right; }
+  .company-clock { margin: 0; font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .company-clock strong { color: var(--ink); font-weight: 500; }
   .now-working strong { color: var(--run); font-weight: 600; }
   main { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; align-items: start; }
   @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
@@ -135,7 +138,10 @@
 <div class="wrap">
   <header>
     <h1>Учёт рабочего времени</h1>
-    <p class="now-working" id="now-working"></p>
+    <div class="header-side">
+      <p class="company-clock" id="company-clock"></p>
+      <p class="now-working" id="now-working"></p>
+    </div>
   </header>
 
   <main>
@@ -205,12 +211,38 @@ function plural(n, one, few, many) {
   return many;
 }
 
+// Всё время на странице — по часам КОМПАНИИ (пояс присылает сервер, /api/config),
+// а не по часам компьютера: удалённый диспетчер видит время Чикаго.
+let COMPANY_TZ = "America/Chicago";
+const CITY = { "America/Chicago": "Чикаго", "America/New_York": "Нью-Йорк",
+               "America/Denver": "Денвер", "America/Los_Angeles": "Лос-Анджелес" };
+
 function clockTime(date) {
-  return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: COMPANY_TZ });
 }
 
 function formatTime(iso) {
-  return new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit",
+                                                 minute: "2-digit", timeZone: COMPANY_TZ });
+}
+
+// Части даты и времени по часам компании: { year, month, day, hour, minute }.
+function companyParts(date) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: COMPANY_TZ, year: "numeric", month: "2-digit",
+    day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(date);
+  return Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
+}
+
+// «2026-11-07» — сегодняшняя дата компании (для полей отчёта).
+function companyDateISO(date) {
+  const p = companyParts(date);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function renderCompanyClock() {
+  const box = $("company-clock");
+  box.replaceChildren("Время компании (" + (CITY[COMPANY_TZ] || COMPANY_TZ) + "): ",
+                      el("strong", {}, clockTime(new Date())));
 }
 
 function el(tag, attrs = {}, text) {
@@ -239,15 +271,9 @@ async function api(method, url, body) {
 
 // ---------- Сотрудники ----------
 
-// Местная полночь: от неё сервер считает «отработано сегодня».
-function localMidnightISO() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-}
-
+// «Отработано сегодня» сервер считает сам — от полуночи компании.
 async function loadEmployees() {
-  const params = new URLSearchParams({ since: localMidnightISO() });
-  const employees = await api("GET", `/api/employees?${params}`);
+  const employees = await api("GET", "/api/employees");
   const fetchedAt = Date.now();
   const list = $("people");
   list.replaceChildren();
@@ -381,10 +407,10 @@ function extendForm(entry, errorNode) {
   return form;
 }
 
-// Значение для поля datetime-local — местное время без пояса: «2026-11-07T18:05».
-function toLocalInput(date) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+// Значение для поля datetime-local — время по часам компании без пояса: «2026-11-07T18:05».
+function toCompanyInput(date) {
+  const p = companyParts(date);
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
 }
 
 // Форма исправления времени окончания. Сервер подсказывает обычное время ухода
@@ -393,20 +419,19 @@ function correctionForm(entry, errorNode) {
   const box = el("div", { class: "correction" });
   const hint = el("p", { class: "note" }, "Подбираю подсказку…");
   const form = el("form", { class: "extend" });
-  const when = el("input", { type: "datetime-local", "aria-label": "Время окончания", required: "" });
+  const when = el("input", { type: "datetime-local", "aria-label": "Время окончания по часам компании", required: "" });
   const note = el("input", { type: "text", placeholder: "Причина (необязательно)", maxlength: "200",
                              "aria-label": "Причина исправления" });
   const save = el("button", { type: "submit", class: "start" }, "Сохранить время");
   form.append(when, note, save);
   box.append(hint, form);
 
-  // Смещение пояса: сервер сам его не знает, а «сутки» и «обычное время» — местные.
-  const offset = -new Date().getTimezoneOffset();
-  api("GET", `/api/entries/${entry.id}/suggested-end?utc_offset_minutes=${offset}`)
+  // Подсказку сервер считает по часам компании.
+  api("GET", `/api/entries/${entry.id}/suggested-end`)
     .then((suggestion) => {
       hint.textContent = suggestion.explanation;
       if (suggestion.suggested_end) {
-        when.value = toLocalInput(new Date(suggestion.suggested_end));
+        when.value = toCompanyInput(new Date(suggestion.suggested_end));
         note.value = "по среднему времени ухода";
       }
     })
@@ -414,9 +439,9 @@ function correctionForm(entry, errorNode) {
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    // datetime-local — местное время; new Date() так его и понимает, toISOString переводит в UTC.
+    // Время в поле — по часам компании; сервер сам переведёт его в UTC (ended_at_local).
     act(save, errorNode, () => api("POST", `/api/entries/${entry.id}/correct`,
-                                   { ended_at: new Date(when.value).toISOString(), note: note.value.trim() || null }));
+                                   { ended_at_local: when.value, note: note.value.trim() || null }));
   });
   setTimeout(() => when.focus(), 0);
   return box;
@@ -472,39 +497,37 @@ setInterval(() => {
 
 // ---------- Отчёт ----------
 
-// Даты из полей — это местные сутки. Начало: полночь первого дня по местному
-// времени; конец: полночь дня ПОСЛЕ последнего. Отправляем с поясом (toISOString даёт UTC).
-function periodFromInputs() {
-  const [fy, fm, fd] = $("date-from").value.split("-").map(Number);
-  const [ty, tm, td] = $("date-to").value.split("-").map(Number);
-  const start = new Date(fy, fm - 1, fd);
-  const end = new Date(ty, tm - 1, td + 1);
-  return { start, end };
-}
-
+// Даты из полей — сутки КОМПАНИИ. Сервер сам переводит их в границы по её поясу
+// и возвращает список суток (report.days) — с учётом перевода часов.
 async function loadReport() {
   $("report-error").textContent = "";
-  const { start, end } = periodFromInputs();
-  if (end <= start) {
+  const dateFrom = $("date-from").value;
+  const dateTo = $("date-to").value;
+  if (dateTo < dateFrom) {  // строки вида 2026-11-07 сравниваются как даты
     $("report-error").textContent = "Дата «по» не может быть раньше даты «с»";
     return;
   }
-  const params = new URLSearchParams({ start: start.toISOString(), end: end.toISOString() });
+  const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
   const report = await api("GET", `/api/report?${params}`);
-  renderReport(report, start, end, new Date());
+  renderReport(report, new Date());
+}
+
+// «пн, 02.11» из даты «2026-11-02». Считаем в UTC: это просто календарная дата, без часов.
+function dayLabel(isoDate) {
+  return new Date(`${isoDate}T12:00:00Z`).toLocaleDateString("ru-RU",
+    { weekday: "short", day: "2-digit", month: "2-digit", timeZone: "UTC" });
 }
 
 // Полоски дня одного сотрудника на общей шкале часов.
-function renderLanes(entries, start, end, now, scale, shownDays) {
-  const lanes = buildLanes(entries, start, end, now);
+function renderLanes(entries, days, now, scale, shownDays) {
+  const lanes = buildLanes(entries, days, now);
   const box = document.createDocumentFragment();
   const span = scale.windowEnd - scale.windowStart;
   const multiDay = shownDays.size > 1;
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   for (const day of lanes.days) {
-    if (!shownDays.has(day.date.getTime())) continue;  // день без записей у всех — пропускаем
+    if (!shownDays.has(day.date)) continue;  // день без записей у всех — пропускаем
     const row = el("div", { class: "lane" });
-    const label = multiDay ? day.date.toLocaleDateString("ru-RU", { weekday: "short", day: "2-digit", month: "2-digit" }) : "";
+    const label = multiDay ? dayLabel(day.date) : "";
     const track = el("div", { class: "track" });
     const described = [];
     for (const seg of day.segments) {
@@ -518,8 +541,8 @@ function renderLanes(entries, start, end, now, scale, shownDays) {
       track.append(piece);
       described.push(text);
     }
-    if (day.date.getTime() === today) {
-      const hours = (now - day.date) / 3600000;
+    if (now >= day.start && now < day.end) {  // сегодняшние сутки компании
+      const hours = (now - day.start) / 3600000;
       if (hours >= scale.windowStart && hours <= scale.windowEnd) {
         const mark = el("div", { class: "now-mark", title: `Сейчас ${clockTime(now)}` });
         mark.style.left = `${((hours - scale.windowStart) / span) * 100}%`;
@@ -547,7 +570,7 @@ function renderAxis(scale) {
   return axis;
 }
 
-function renderReport(report, start, end, now) {
+function renderReport(report, now) {
   const box = $("report");
   box.replaceChildren();
   if (!report.employees.length) {
@@ -578,7 +601,7 @@ function renderReport(report, start, end, now) {
   }
   // Общая шкала часов для всех сотрудников — чтобы полосы можно было сравнивать.
   const allEntries = report.employees.flatMap((row) => row.entries);
-  const scale = buildLanes(allEntries, start, end, now);
+  const scale = buildLanes(allEntries, report.days, now);
   if (scale.tooLong) {
     box.append(el("p", { class: "empty" }, "Лента дня показывается для периода до 14 дней."));
   } else {
@@ -644,7 +667,7 @@ function renderReport(report, start, end, now) {
     if (!scale.tooLong) {
       const lanesRow = el("tr");
       const cell = el("td", { class: "lanes", colspan: "2" });
-      cell.append(renderLanes(row.entries, start, end, now, scale, shownDays));
+      cell.append(renderLanes(row.entries, report.days, now, scale, shownDays));
       lanesRow.append(cell);
       table.append(lanesRow);
     }
@@ -670,12 +693,25 @@ $("report-form").addEventListener("submit", async (event) => {
   try { await loadReport(); } catch (error) { $("report-error").textContent = error.message; }
 });
 
-// Старт: по умолчанию — отчёт за сегодня.
-const today = new Date();
-const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-$("date-from").value = iso;
-$("date-to").value = iso;
-loadEmployees().catch((error) => { $("add-error").textContent = `Не удалось загрузить сотрудников: ${error.message}`; });
+// Старт: узнаём пояс компании, ставим «сегодня» компании в поля отчёта, грузим сотрудников.
+async function start() {
+  try {
+    COMPANY_TZ = (await api("GET", "/api/config")).company_timezone;
+  } catch (error) {
+    $("add-error").textContent = `Не удалось узнать пояс компании, показываю ${COMPANY_TZ}: ${error.message}`;
+  }
+  renderCompanyClock();
+  setInterval(renderCompanyClock, 15000);
+  const today = companyDateISO(new Date());
+  $("date-from").value = today;
+  $("date-to").value = today;
+  try {
+    await loadEmployees();
+  } catch (error) {
+    $("add-error").textContent = `Не удалось загрузить сотрудников: ${error.message}`;
+  }
+}
+start();
 </script>
 </body>
 </html>

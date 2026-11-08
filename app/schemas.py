@@ -4,10 +4,10 @@ Pydantic проверяет входящие данные до того, как 
 пустое имя, слишком длинное описание или неизвестный тип записи
 отклоняются ответом 422.
 """
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, model_validator
+from pydantic import AwareDatetime, BaseModel, Field, NaiveDatetime, StringConstraints, model_validator
 
 from app.models import DESCRIPTION_MAX_LENGTH, NAME_MAX_LENGTH, NOTE_MAX_LENGTH
 
@@ -57,10 +57,22 @@ Note = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 
 
 class EntryCorrect(BaseModel):
-    """Исправление времени окончания записи задним числом."""
+    """Исправление времени окончания записи задним числом.
 
-    ended_at: AwareDatetime
+    Время — ровно одно из двух: точный момент с поясом (ended_at) или время
+    «как на часах компании» без пояса (ended_at_local) — так шлёт страница,
+    чтобы удалённый сотрудник вводил время компании, а не своё.
+    """
+
+    ended_at: AwareDatetime | None = None
+    ended_at_local: NaiveDatetime | None = None
     note: Note | None = None  # почему исправили; без причины — стандартная пометка
+
+    @model_validator(mode="after")
+    def _exactly_one_time(self) -> "EntryCorrect":
+        if (self.ended_at is None) == (self.ended_at_local is None):
+            raise ValueError("Укажите время окончания: ended_at или ended_at_local")
+        return self
 
 
 class SuggestedEnd(BaseModel):
@@ -120,11 +132,27 @@ class EmployeeReport(BaseModel):
     entries: list[EntryOut]
 
 
+class ReportDay(BaseModel):
+    """Одни сутки компании: дата и их границы в UTC (для ленты дня)."""
+
+    date: date
+    start: datetime
+    end: datetime
+
+
+class ConfigOut(BaseModel):
+    """Настройки, которые нужны странице."""
+
+    company_timezone: str
+
+
 class ReportOut(BaseModel):
     """Отчёт за период [start, end)."""
 
     start: datetime
     end: datetime
+    timezone: str  # пояс компании, по которому посчитаны сутки
+    days: list[ReportDay]  # сутки компании, попадающие в период
     total_seconds: int  # рабочее время всех сотрудников
     break_seconds: int
     lunch_seconds: int

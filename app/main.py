@@ -6,7 +6,7 @@
 """
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -16,8 +16,10 @@ from pydantic import AwareDatetime
 from sqlalchemy.orm import Session
 
 from app import services
+from app.config import COMPANY_TIMEZONE_NAME, COMPANY_TZ, company_day_bounds, company_today
 from app.db import engine, get_db, init_db
 from app.schemas import (
+    ConfigOut,
     DaySummary,
     EmployeeCreate,
     EmployeeOut,
@@ -81,6 +83,12 @@ async def _conflict(_request: Request, error: Exception) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(error)})
 
 
+@app.get("/api/config", response_model=ConfigOut)
+def config() -> ConfigOut:
+    """Настройки для страницы: пояс компании, в котором показывать время."""
+    return ConfigOut(company_timezone=COMPANY_TIMEZONE_NAME)
+
+
 @app.post("/api/employees", status_code=201, response_model=EmployeeOut)
 def add_employee(body: EmployeeCreate, db: Session = Depends(get_checked_db)) -> EmployeeOut:
     """Добавить сотрудника."""
@@ -92,17 +100,17 @@ def add_employee(body: EmployeeCreate, db: Session = Depends(get_checked_db)) ->
 @app.get("/api/employees", response_model=list[EmployeeOut])
 def employees(
     since: AwareDatetime | None = Query(
-        default=None, description="Начало «сегодня» у пользователя (местная полночь), с часовым поясом"
+        default=None, description="Начало «сегодня», с часовым поясом; по умолчанию — полночь компании"
     ),
     db: Session = Depends(get_checked_db),
     now: datetime = Depends(get_now),
 ) -> list[EmployeeOut]:
     """Список сотрудников: идущий таймер и итоги дня («отработано сегодня»).
 
-    Сервер не знает, в каком поясе пользователь, поэтому начало суток
-    присылает страница. Без него считаем с полуночи UTC.
+    «Сегодня» — сутки компании (по умолчанию Чикаго), а не сервера и не
+    сотрудника: удалённый диспетчер работает по американским часам.
     """
-    day_start = since if since is not None else now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = since if since is not None else company_day_bounds(company_today(now))[0]
     summaries = services.day_summaries(db, day_start, now)
     result = []
     for employee in services.list_employees(db):
@@ -153,13 +161,14 @@ def extend_entry(
 @app.get("/api/entries/{entry_id}/suggested-end", response_model=SuggestedEnd)
 def suggested_end(
     entry_id: int,
-    utc_offset_minutes: int = Query(default=0, ge=-14 * 60, le=14 * 60,
-                                    description="Смещение пояса пользователя от UTC в минутах (Минск: 180)"),
+    utc_offset_minutes: int | None = Query(default=None, ge=-14 * 60, le=14 * 60,
+                                           description="Смещение от UTC в минутах; по умолчанию — пояс компании"),
     db: Session = Depends(get_checked_db),
     now: datetime = Depends(get_now),
 ) -> SuggestedEnd:
     """Подсказка для исправления: обычное время ухода за последние 7 дней."""
-    return services.suggest_end(db, entry_id, utc_offset_minutes, now)
+    local = COMPANY_TZ if utc_offset_minutes is None else timezone(timedelta(minutes=utc_offset_minutes))
+    return services.suggest_end(db, entry_id, local, now)
 
 
 @app.post("/api/entries/{entry_id}/correct", response_model=EntryOut)
@@ -167,18 +176,41 @@ def correct_entry(
     entry_id: int, body: EntryCorrect, db: Session = Depends(get_checked_db), now: datetime = Depends(get_now)
 ) -> EntryOut:
     """Исправить время окончания записи — с пометкой «исправлено» в отчёте."""
-    entry = services.correct_end(db, entry_id, body.ended_at, body.note, now)
+    # Время «по часам компании» привязываем к её поясу. В час перевода часов
+    # назад (01:00–02:00 бывает дважды) берётся первое из двух — так делает Python по умолчанию.
+    ended_at = body.ended_at if body.ended_at is not None else body.ended_at_local.replace(tzinfo=COMPANY_TZ)
+    entry = services.correct_end(db, entry_id, ended_at, body.note, now)
     return services.entry_out(entry, now)
 
 
 @app.get("/api/report", response_model=ReportOut)
 def report(
-    start: AwareDatetime = Query(description="Начало периода, с часовым поясом"),
-    end: AwareDatetime = Query(description="Конец периода (не включая), с часовым поясом"),
+    date_from: date | None = Query(default=None, description="Первый день периода (по часам компании)"),
+    date_to: date | None = Query(default=None, description="Последний день периода, включительно"),
+    start: AwareDatetime | None = Query(default=None, description="Или: начало периода, с часовым поясом"),
+    end: AwareDatetime | None = Query(default=None, description="Или: конец периода (не включая)"),
     db: Session = Depends(get_checked_db),
     now: datetime = Depends(get_now),
 ) -> ReportOut:
-    """Записи и общее время каждого сотрудника за период."""
+    """Записи и общее время каждого сотрудника за период.
+
+    Обычно период задают датами компании (date_from, date_to) — так делает
+    страница. Точные моменты (start, end) оставлены для интеграций.
+    Нужна ровно одна пара.
+    """
+    by_dates = date_from is not None or date_to is not None
+    by_moments = start is not None or end is not None
+    if by_dates == by_moments:
+        raise HTTPException(status_code=422, detail="Укажите период: date_from и date_to (или start и end)")
+    if by_dates:
+        if date_from is None or date_to is None:
+            raise HTTPException(status_code=422, detail="Нужны обе даты: date_from и date_to")
+        if date_to < date_from:
+            raise HTTPException(status_code=422, detail="Дата «по» не может быть раньше даты «с»")
+        start = company_day_bounds(date_from)[0]
+        end = company_day_bounds(date_to)[1]
+    elif start is None or end is None:
+        raise HTTPException(status_code=422, detail="Нужны оба момента: start и end")
     if end <= start:
         raise HTTPException(status_code=422, detail="Конец периода должен быть позже начала")
     return services.build_report(db, start, end, now)

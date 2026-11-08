@@ -19,6 +19,7 @@ from datetime import date, datetime, time, timedelta, tzinfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import COMPANY_TZ
 from app.db import SessionLocal, engine, init_db
 from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, Employee, TimeEntry
 from app.services import DEFAULT_DESCRIPTIONS
@@ -146,7 +147,8 @@ def main(argv: list[str] | None = None) -> int:
     init_db(engine)
     with SessionLocal() as db:
         try:
-            count = seed(db, datetime.now().astimezone(), append=args.append)
+            # Рабочие дни демо — по часам компании (по умолчанию Чикаго), а не компьютера.
+            count = seed(db, datetime.now(COMPANY_TZ), append=args.append)
         except SeedRefused as refusal:
             print(refusal)
             return 1

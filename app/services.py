@@ -4,14 +4,15 @@
 можно объяснить и проверить отдельно. Текущее время передаётся параметром
 (now), а не берётся внутри: так тесты могут «управлять часами».
 """
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import COMPANY_TIMEZONE_NAME, COMPANY_TZ, company_day_bounds
 from app.models import KIND_BREAK, KIND_LUNCH, KIND_WORK, MAX_LIMIT_HOURS, Employee, TimeEntry
-from app.schemas import DaySummary, EmployeeReport, EntryOut, ReportOut, SuggestedEnd
+from app.schemas import DaySummary, EmployeeReport, EntryOut, ReportDay, ReportOut, SuggestedEnd
 
 
 class EmployeeNotFound(Exception):
@@ -209,25 +210,25 @@ def _days_word(n: int) -> str:
     return "дням"
 
 
-def suggest_end(db: Session, entry_id: int, utc_offset_minutes: int, now: datetime) -> SuggestedEnd:
+def suggest_end(db: Session, entry_id: int, local: tzinfo, now: datetime) -> SuggestedEnd:
     """Подсказка для исправления: среднее время ухода сотрудника за прошлые 7 дней.
 
-    «Уход» — конец последней записи дня. Сутки считаются по местному времени
-    пользователя (смещение от UTC присылает страница). В среднее НЕ идут
+    «Уход» — конец последней записи дня. Сутки считаются в поясе local
+    (по умолчанию — пояс компании). В среднее НЕ идут
     автоостановленные и уже исправленные записи: это догадки, а не факты —
     иначе подсказка начала бы подтверждать сама себя.
     """
     entry = _get_entry(db, entry_id)
-    local = timezone(timedelta(minutes=utc_offset_minutes))
     entry_day = entry.started_at.astimezone(local).date()
-    day_start = datetime.combine(entry_day, time(0), tzinfo=local)
+    day_start, _ = company_day_bounds(entry_day, local)
+    history_start, _ = company_day_bounds(entry_day - timedelta(days=SUGGESTION_DAYS), local)
     history = db.scalars(
         select(TimeEntry).where(
             TimeEntry.employee_id == entry.employee_id,
             TimeEntry.ended_at.is_not(None),
             TimeEntry.auto_stopped.is_(False),
             TimeEntry.corrected.is_(False),
-            TimeEntry.ended_at >= day_start - timedelta(days=SUGGESTION_DAYS),
+            TimeEntry.ended_at >= history_start,
             TimeEntry.ended_at < day_start,
         )
     ).all()
@@ -243,15 +244,18 @@ def suggest_end(db: Session, entry_id: int, utc_offset_minutes: int, now: dateti
                             explanation="Нет истории за последние 7 дней — укажите время вручную")
 
     minutes = [t.hour * 60 + t.minute + t.second / 60 for t in last_leave.values()]
-    suggested = day_start + timedelta(minutes=round(sum(minutes) / days))
-    usual = f"Обычно уходит в {suggested:%H:%M} — среднее по {days} {_days_word(days)}"
+    average = round(sum(minutes) / days)
+    # Время «на стене» в тот день, а не «полночь + N минут»: в день перевода
+    # часов это разные моменты.
+    suggested = datetime.combine(entry_day, time(average // 60, average % 60), tzinfo=local).astimezone(timezone.utc)
+    usual = f"Обычно уходит в {suggested.astimezone(local):%H:%M} — среднее по {days} {_days_word(days)}"
     if suggested <= entry.started_at:
         return SuggestedEnd(suggested_end=None, based_on_days=days,
                             explanation=f"{usual}, но эта запись началась позже — укажите время вручную")
     if suggested > now:
         return SuggestedEnd(suggested_end=None, based_on_days=days,
                             explanation=f"{usual}, но это время ещё не наступило — укажите вручную")
-    return SuggestedEnd(suggested_end=suggested.astimezone(timezone.utc), based_on_days=days, explanation=usual)
+    return SuggestedEnd(suggested_end=suggested, based_on_days=days, explanation=usual)
 
 
 def correct_end(db: Session, entry_id: int, ended_at: datetime, note: str | None, now: datetime) -> TimeEntry:
@@ -272,7 +276,8 @@ def correct_end(db: Session, entry_id: int, ended_at: datetime, note: str | None
     ).first()
     if following is not None and ended_at > following.started_at:
         raise InvalidCorrection("Выбранное время пересекается со следующей записью этого сотрудника")
-    entry.ended_at = ended_at
+    # Храним и отдаём в UTC, в каком бы поясе ни пришло время, — единый формат ответа.
+    entry.ended_at = ended_at.astimezone(timezone.utc)
     entry.corrected = True
     entry.correction_note = note or DEFAULT_CORRECTION_NOTE
     db.commit()
@@ -382,9 +387,19 @@ def build_report(db: Session, start: datetime, end: datetime, now: datetime) -> 
             entries=[entry_out(e, now) for e in own],
         ))
 
+    report_days = []
+    day = start.astimezone(COMPANY_TZ).date()
+    last_day = (end - timedelta(microseconds=1)).astimezone(COMPANY_TZ).date()
+    while day <= last_day:
+        day_start, day_end = company_day_bounds(day)
+        report_days.append(ReportDay(date=day, start=day_start, end=day_end))
+        day += timedelta(days=1)
+
     return ReportOut(
         start=start,
         end=end,
+        timezone=COMPANY_TIMEZONE_NAME,
+        days=report_days,
         total_seconds=sum(r.total_seconds for r in rows),
         break_seconds=sum(r.break_seconds for r in rows),
         lunch_seconds=sum(r.lunch_seconds for r in rows),

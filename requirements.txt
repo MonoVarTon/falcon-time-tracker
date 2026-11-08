@@ -3,3 +3,4 @@ uvicorn==0.54.0
 sqlalchemy==2.0.57
 pytest==9.2.0
 httpx==0.28.1
+tzdata==2026.6
