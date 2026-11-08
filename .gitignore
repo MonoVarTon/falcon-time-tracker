@@ -9,3 +9,10 @@ venv/
 # редакторы
 .vscode/
 .idea/
+
+# ревью второй модели — рабочий материал, в репозиторий не идёт
+docs/gemini-review.md
+# файлы журнала SQLite (на случай режима WAL)
+*.db-wal
+*.db-shm
+*.db-journal

@@ -449,6 +449,10 @@ function extendForm(entry, errorNode) {
   for (const h of [2, 4, 6]) {
     if (entry.limit_hours + h <= 24) hours.append(el("option", { value: String(h) }, `+${h} ч`));
   }
+  // Продлевать некуда — вместо пустого списка честная фраза.
+  if (!hours.childElementCount) {
+    return el("p", { class: "note" }, "Рабочий день уже продлён до предела — 24 часа.");
+  }
   const confirm = el("button", { type: "submit", class: "start" }, "Подтвердить продление");
   form.append(who, hours, confirm);
   form.addEventListener("submit", (event) => {
@@ -577,7 +581,8 @@ async function loadReport() {
   }
   const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
   const report = await api("GET", `/api/report?${params}`);
-  renderReport(report, new Date());
+  // «Сейчас» — по часам сервера: если часы компьютера спешат, отметка на ленте не съедет.
+  renderReport(report, new Date(report.now));
 }
 
 // «пн, 02.11» из даты «2026-11-02». Считаем в UTC: это просто календарная дата, без часов.

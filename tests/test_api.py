@@ -117,6 +117,7 @@ def test_empty_report_without_employees(client: TestClient) -> None:
     # Сутки компании (Чикаго), которые задевает период 09:00–09:00 UTC: 7 и 8 ноября.
     assert [d["date"] for d in body.pop("days")] == ["2026-11-07", "2026-11-08"]
     assert body.pop("timezone") == "America/Chicago"
+    assert body.pop("now") == "2026-11-07T09:00:00Z"  # часы теста
     assert body == {
         "start": "2026-11-07T09:00:00Z",
         "end": "2026-11-08T09:00:00Z",

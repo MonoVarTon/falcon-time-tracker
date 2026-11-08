@@ -64,7 +64,7 @@ def test_yesterday_is_not_counted_today(client: TestClient, clock: FakeClock) ->
 
 
 def test_list_works_without_since(client: TestClient) -> None:
-    """Без параметра since сутки считаются с полуночи UTC — список всё равно работает."""
+    """Без параметра since «сегодня» считается от полуночи компании — список работает."""
     add_employee(client)
 
     response = client.get("/api/employees")

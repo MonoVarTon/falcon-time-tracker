@@ -106,7 +106,13 @@ def test_suggestion_respects_users_timezone(client: TestClient, clock: FakeClock
     forgotten = start_forgotten(client, clock, employee_id, day_at(3, 6))
     clock.now = day_at(3, 20)
 
-    assert suggestion(client, forgotten, offset=180)["suggested_end"] == "2026-11-03T15:00:00Z"
+    body = suggestion(client, forgotten, offset=180)
+
+    assert body["suggested_end"] == "2026-11-03T15:00:00Z"
+    # Момент совпадает и при поясе UTC (15:00 UTC = 18:00 Минск), поэтому одного его мало:
+    # пояс виден только в объяснении. Без этой строки проверка проходила с игнорированием
+    # пояса (нашёл Gemini при ревью).
+    assert body["explanation"].startswith("Обычно уходит в 18:00")
 
 
 # ---------- Исправление ----------

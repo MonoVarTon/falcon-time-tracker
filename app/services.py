@@ -6,7 +6,7 @@
 """
 from datetime import datetime, time, timedelta, timezone, tzinfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -45,6 +45,8 @@ class InvalidCorrection(Exception):
 
 # За сколько прошлых дней считаем обычное время ухода.
 SUGGESTION_DAYS = 7
+# Промежуток между записями больше этого — уже другая смена (обед и перерывы короче).
+SHIFT_GAP = timedelta(hours=4)
 DEFAULT_CORRECTION_NOTE = "Время окончания исправлено вручную"
 
 
@@ -185,15 +187,29 @@ def extend_limit(db: Session, entry_id: int, approved_by: str, hours: int) -> Ti
 
     Входа по паролю в приложении нет (задание его не требует), поэтому
     подтверждение — это записанное имя руководителя, а не проверка роли.
+
+    Продление — ОДНА команда базе «прибавь, если запись идёт и не выйдет за 24 ч».
+    Иначе два руководителя, нажавшие одновременно, оба прочитали бы старый
+    лимит, и второй молча затёр бы подтверждение первого (нашёл Gemini при ревью).
     """
     entry = _get_entry(db, entry_id)
-    if entry.ended_at is not None:
-        raise NoRunningTimer("Запись уже закрыта — продлевать нечего")
-    if entry.limit_hours + hours > MAX_LIMIT_HOURS:
-        raise LimitTooHigh(f"Рабочий день нельзя продлить больше чем до {MAX_LIMIT_HOURS} часов")
-    entry.limit_hours += hours
-    entry.approved_by = approved_by
+    changed = db.execute(
+        update(TimeEntry)
+        .where(
+            TimeEntry.id == entry_id,
+            TimeEntry.ended_at.is_(None),
+            TimeEntry.limit_hours + hours <= MAX_LIMIT_HOURS,
+        )
+        .values(limit_hours=TimeEntry.limit_hours + hours, approved_by=approved_by)
+        .execution_options(synchronize_session=False)
+    ).rowcount
     db.commit()
+    db.refresh(entry)  # перечитать то, что реально записано в базе
+    if changed == 0:
+        if entry.ended_at is not None:
+            raise NoRunningTimer("Запись уже закрыта — продлевать нечего")
+        raise LimitTooHigh(f"Рабочий день нельзя продлить больше чем до {MAX_LIMIT_HOURS} часов "
+                           f"(сейчас {entry.limit_hours} ч)")
     return entry
 
 
@@ -219,45 +235,69 @@ def _days_word(n: int) -> str:
     return "дням"
 
 
+def _shifts(entries: list[TimeEntry]) -> list[list[TimeEntry]]:
+    """Делит записи на смены: подряд идущие записи с промежутком меньше SHIFT_GAP.
+
+    Ночная смена 17:00–02:00 с перерывом после полуночи — одна смена,
+    а не два «дня». Записи должны быть отсортированы по началу.
+    """
+    shifts: list[list[TimeEntry]] = []
+    for entry in entries:
+        if shifts and entry.started_at - shifts[-1][-1].ended_at < SHIFT_GAP:
+            shifts[-1].append(entry)
+        else:
+            shifts.append([entry])
+    return shifts
+
+
 def suggest_end(db: Session, entry_id: int, local: tzinfo, now: datetime) -> SuggestedEnd:
     """Подсказка для исправления: среднее время ухода сотрудника за прошлые 7 дней.
 
-    «Уход» — конец последней записи дня. Сутки считаются в поясе local
-    (по умолчанию — пояс компании). В среднее НЕ идут
-    автоостановленные и уже исправленные записи: это догадки, а не факты —
-    иначе подсказка начала бы подтверждать сама себя.
+    «Уход» — конец смены, отсчитанный ОТ ДНЯ НАЧАЛА смены (в поясе local):
+    уход в 18:00 — это 18 ч, а ночной уход в 02:00 следующего дня — 26 ч.
+    Так ночные смены и уход около полуночи считаются без особых случаев.
+    В среднее НЕ идут смены с автоостановленными или исправленными записями:
+    это догадки, а не факты — иначе подсказка подтверждала бы сама себя.
     """
     entry = _get_entry(db, entry_id)
     entry_day = entry.started_at.astimezone(local).date()
-    day_start, _ = company_day_bounds(entry_day, local)
     history_start, _ = company_day_bounds(entry_day - timedelta(days=SUGGESTION_DAYS), local)
     history = db.scalars(
-        select(TimeEntry).where(
+        select(TimeEntry)
+        .where(
             TimeEntry.employee_id == entry.employee_id,
             TimeEntry.ended_at.is_not(None),
-            TimeEntry.auto_stopped.is_(False),
-            TimeEntry.corrected.is_(False),
-            TimeEntry.ended_at >= history_start,
-            TimeEntry.ended_at < day_start,
+            TimeEntry.started_at >= history_start,
+            # Всё до начала забытой записи — вместе с частью ночной смены после полуночи.
+            TimeEntry.started_at < entry.started_at,
         )
+        .order_by(TimeEntry.started_at)
     ).all()
 
-    last_leave: dict = {}  # местная дата → время последнего окончания в этот день
-    for past in history:
-        ended = past.ended_at.astimezone(local)
-        if ended.date() not in last_leave or ended > last_leave[ended.date()]:
-            last_leave[ended.date()] = ended
-    days = len(last_leave)
+    leave_by_day: dict = {}  # день начала смены → минуты ухода от полуночи этого дня
+    for shift in _shifts(list(history)):
+        if any(e.auto_stopped or e.corrected for e in shift):
+            continue
+        shift_day = shift[0].started_at.astimezone(local).date()
+        if shift_day >= entry_day:
+            continue  # смены, начатые в день забытой записи, — не «прошлые дни»
+        ended = shift[-1].ended_at.astimezone(local)
+        minutes = (ended.date() - shift_day).days * 1440 + ended.hour * 60 + ended.minute + ended.second / 60
+        leave_by_day[shift_day] = max(minutes, leave_by_day.get(shift_day, 0))
+    days = len(leave_by_day)
     if not days:
         return SuggestedEnd(suggested_end=None, based_on_days=0,
                             explanation="Нет истории за последние 7 дней — укажите время вручную")
 
-    minutes = [t.hour * 60 + t.minute + t.second / 60 for t in last_leave.values()]
-    average = round(sum(minutes) / days)
-    # Время «на стене» в тот день, а не «полночь + N минут»: в день перевода
-    # часов это разные моменты.
-    suggested = datetime.combine(entry_day, time(average // 60, average % 60), tzinfo=local).astimezone(timezone.utc)
-    usual = f"Обычно уходит в {suggested.astimezone(local):%H:%M} — среднее по {days} {_days_word(days)}"
+    average = round(sum(leave_by_day.values()) / days)
+    extra_days, minute_of_day = divmod(average, 1440)
+    # Время «на стене» в нужный день, а не «полночь + N минут»: в день перевода
+    # часов это разные моменты. 24:00 становится 00:00 следующего дня.
+    leave_day = entry_day + timedelta(days=extra_days)
+    suggested = datetime.combine(leave_day, time(minute_of_day // 60, minute_of_day % 60),
+                                 tzinfo=local).astimezone(timezone.utc)
+    next_day = " следующего дня" if extra_days else ""
+    usual = f"Обычно уходит в {suggested.astimezone(local):%H:%M}{next_day} — среднее по {days} {_days_word(days)}"
     if suggested <= entry.started_at:
         return SuggestedEnd(suggested_end=None, based_on_days=days,
                             explanation=f"{usual}, но эта запись началась позже — укажите время вручную")
@@ -408,6 +448,7 @@ def build_report(db: Session, start: datetime, end: datetime, now: datetime) -> 
         start=start,
         end=end,
         timezone=COMPANY_TIMEZONE_NAME,
+        now=now,
         days=report_days,
         total_seconds=sum(r.total_seconds for r in rows),
         break_seconds=sum(r.break_seconds for r in rows),

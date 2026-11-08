@@ -156,6 +156,7 @@ class ReportOut(BaseModel):
     start: datetime
     end: datetime
     timezone: str  # пояс компании, по которому посчитаны сутки
+    now: datetime  # «сейчас» по часам сервера — для отметки на ленте дня
     days: list[ReportDay]  # сутки компании, попадающие в период
     total_seconds: int  # рабочее время всех сотрудников
     break_seconds: int

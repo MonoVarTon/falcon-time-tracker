@@ -188,6 +188,11 @@ def correct_entry(
     return services.entry_out(entry, now)
 
 
+# Отчёт больше чем за год не строим: 47 000 суток за запрос подвесили бы
+# сервер (нашёл Gemini при ревью). Для архива — выгрузка, а не страница.
+MAX_REPORT_DAYS = 366
+
+
 @app.get("/api/report", response_model=ReportOut)
 def report(
     date_from: date | None = Query(default=None, description="Первый день периода (по часам компании)"),
@@ -212,12 +217,17 @@ def report(
             raise HTTPException(status_code=422, detail="Нужны обе даты: date_from и date_to")
         if date_to < date_from:
             raise HTTPException(status_code=422, detail="Дата «по» не может быть раньше даты «с»")
-        start = company_day_bounds(date_from)[0]
-        end = company_day_bounds(date_to)[1]
+        try:
+            start = company_day_bounds(date_from)[0]
+            end = company_day_bounds(date_to)[1]
+        except OverflowError as error:  # 31.12.9999: следующего дня не существует
+            raise HTTPException(status_code=422, detail="Дата вне допустимого диапазона") from error
     elif start is None or end is None:
         raise HTTPException(status_code=422, detail="Нужны оба момента: start и end")
     if end <= start:
         raise HTTPException(status_code=422, detail="Конец периода должен быть позже начала")
+    if end - start > timedelta(days=MAX_REPORT_DAYS + 1):  # +1: запас на сутки перевода часов
+        raise HTTPException(status_code=422, detail=f"Период отчёта — не больше {MAX_REPORT_DAYS} дней")
     return services.build_report(db, start, end, now)
 
 
