@@ -16,9 +16,13 @@
 
 Нужен Python 3.10 или новее (проверено на Windows с Python 3.12 и на Linux с Python 3.10).
 
+```
+git clone https://github.com/MonoVarTon/falcon-time-tracker.git
+```
+
 **Windows (командная строка):**
 ```
-cd /d путь\к\falcon-time-tracker
+cd falcon-time-tracker
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
@@ -27,7 +31,7 @@ python -m uvicorn app.main:app
 
 **macOS / Linux:**
 ```
-cd путь/к/falcon-time-tracker
+cd falcon-time-tracker
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
