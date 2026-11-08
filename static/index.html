@@ -30,17 +30,24 @@
   .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
   header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; margin-bottom: 28px; }
   h1 { font-size: 28px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
-  .now-working { color: var(--muted); margin: 0; }
   .header-side { text-align: right; }
   .company-clock { margin: 0; font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .company-clock strong { color: var(--ink); font-weight: 500; }
-  .now-working strong { color: var(--run); font-weight: 600; }
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+  .filters button { background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+                    padding: 4px 12px; font-size: 14px; font-weight: 400; }
+  .filters button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .filters button.attention { border-color: #e7b3ad; color: #7a1a12; }
+  .filters button.attention[aria-pressed="true"] { background: #7a1a12; border-color: #7a1a12; color: #fff; }
+  .filters .num { font-variant-numeric: tabular-nums; font-weight: 600; margin-left: 4px; }
+  .search { width: 100%; margin-top: 16px; }
+  .person.attention { border-left: 3px solid #b42318; padding-left: 10px; margin-left: -13px; }
   main { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; align-items: start; }
   @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
   h2 { font-size: 19px; font-weight: 600; margin: 0 0 14px; }
   form.inline { display: flex; gap: 8px; flex-wrap: wrap; }
-  input[type=text], input[type=date] {
+  input[type=text], input[type=date], input[type=search] {
     font: inherit; color: inherit; background: #fff; border: 1px solid var(--line);
     border-radius: 6px; padding: 8px 10px; min-width: 0;
   }
@@ -140,7 +147,7 @@
     <h1>Учёт рабочего времени</h1>
     <div class="header-side">
       <p class="company-clock" id="company-clock"></p>
-      <p class="now-working" id="now-working"></p>
+      <div class="filters" id="filters" role="group" aria-label="Показать сотрудников"></div>
     </div>
   </header>
 
@@ -152,6 +159,7 @@
         <button type="submit">Добавить сотрудника</button>
       </form>
       <p class="error" id="add-error" role="alert"></p>
+      <input type="search" id="search" class="search" placeholder="Найти по имени" aria-label="Найти сотрудника по имени" hidden>
       <p class="empty" id="people-empty" hidden>Пока никого нет. Добавьте первого сотрудника — и сможете запускать его таймер.</p>
       <ul class="people" id="people"></ul>
     </section>
@@ -271,29 +279,72 @@ async function api(method, url, body) {
 
 // ---------- Сотрудники ----------
 
+// Группы сотрудников для фильтров в шапке. Каждый сотрудник — ровно в одной из
+// групп «работают / на паузе / не начали», поэтому их сумма равна «всем».
+// «Требуют внимания» — отдельная метка поверх: таймер идёт слишком долго или
+// запись остановилась сама и ждёт уточнения времени.
+const FILTERS = [
+  { key: "all", label: "Все", test: () => true },
+  { key: "attention", label: "⚠ Требуют внимания", test: (e) => e.needs_attention, cls: "attention" },
+  { key: "working", label: "Работают", test: (e) => e.active_entry && e.active_entry.kind === "work" },
+  { key: "paused", label: "На паузе", test: (e) => e.active_entry && e.active_entry.kind !== "work" },
+  { key: "idle", label: "Не начали", test: (e) => !e.active_entry },
+];
+let currentFilter = "all";
+let lastEmployees = [];
+let lastFetchedAt = 0;
+
 // «Отработано сегодня» сервер считает сам — от полуночи компании.
 async function loadEmployees() {
-  const employees = await api("GET", "/api/employees");
-  const fetchedAt = Date.now();
+  lastEmployees = await api("GET", "/api/employees");
+  lastFetchedAt = Date.now();
+  renderEmployees();
+}
+
+// Рисует список по текущему фильтру и поиску — без нового запроса к серверу.
+function renderEmployees() {
+  const employees = lastEmployees;
   const list = $("people");
   list.replaceChildren();
   running = [];
   $("people-empty").hidden = employees.length > 0;
-
-  const workingNow = employees.filter((e) => e.active_entry && e.active_entry.kind === "work").length;
-  const pausedNow = employees.filter((e) => e.active_entry && e.active_entry.kind !== "work").length;
-  $("now-working").replaceChildren();
-  if (employees.length) {
-    $("now-working").append("Сейчас работают: ", el("strong", {}, `${workingNow} из ${employees.length}`));
-    if (pausedNow) $("now-working").append(`, на перерыве или обеде: ${pausedNow}`);
+  $("search").hidden = employees.length === 0;
+  // Фильтр «требуют внимания» мог опустеть (последнего исправили) — его кнопка
+  // исчезнет, поэтому возвращаемся ко «Все» ДО того, как рисовать кнопки и список.
+  if (currentFilter === "attention" && !employees.some((e) => e.needs_attention)) {
+    currentFilter = "all";
   }
+  renderFilters(employees);
 
-  for (const employee of employees) list.append(renderEmployee(employee, fetchedAt));
+  const filter = FILTERS.find((f) => f.key === currentFilter);
+  const query = $("search").value.trim().toLowerCase();
+  // Требующие внимания — первыми: при сотне сотрудников их не надо искать.
+  const shown = employees
+    .filter((e) => filter.test(e) && e.name.toLowerCase().includes(query))
+    .sort((a, b) => Number(b.needs_attention) - Number(a.needs_attention));
+  for (const employee of shown) list.append(renderEmployee(employee, lastFetchedAt));
+  if (employees.length && !shown.length) list.append(el("li", { class: "empty" }, "Никого не найдено."));
+}
+
+function renderFilters(employees) {
+  const box = $("filters");
+  box.replaceChildren();
+  if (!employees.length) return;
+  for (const f of FILTERS) {
+    const count = employees.filter(f.test).length;
+    if (f.key === "attention" && !count) continue;  // некого показывать — кнопку прячем
+    const button = el("button", { type: "button", "aria-pressed": String(currentFilter === f.key) });
+    if (f.cls) button.classList.add(f.cls);
+    button.append(f.label, el("span", { class: "num" }, String(count)));
+    button.addEventListener("click", () => { currentFilter = f.key; renderEmployees(); });
+    box.append(button);
+  }
 }
 
 function renderEmployee(employee, fetchedAt) {
   const entry = employee.active_entry;
   const item = el("li", { class: entry ? `person running kind-${entry.kind}` : "person" });
+  if (employee.needs_attention) item.classList.add("attention");
   const head = el("div", { class: "person-head" });
   head.append(el("span", { class: "person-name" }, employee.name),
               el("span", { class: "status" },
@@ -361,6 +412,8 @@ function renderEmployee(employee, fetchedAt) {
     });
     item.append(form);
   }
+  // Запись, остановившаяся сама, — уточнить время можно прямо здесь.
+  if (employee.review_entry) item.append(reviewNotice(employee.review_entry, error));
   item.append(error);
   return item;
 }
@@ -447,6 +500,19 @@ function correctionForm(entry, errorNode) {
   return box;
 }
 
+// Запись остановилась сама — уточнить время прямо в строке сотрудника.
+function reviewNotice(entry, errorNode) {
+  const box = el("div", { class: "warning", role: "status" });
+  const body = el("div", { class: "warning-body" });
+  body.append(el("span", {}, `Таймер с ${formatTime(entry.started_at)} остановился сам через ${entry.limit_hours} ч ` +
+                            `(«${entry.description}») — уточните время окончания.`));
+  const fix = el("button", { type: "button", class: "ghost" }, "Исправить время окончания");
+  fix.addEventListener("click", () => fix.replaceWith(correctionForm(entry, errorNode)));
+  body.append(fix);
+  box.append(el("span", { class: "warning-icon", "aria-hidden": "true" }, "⏹"), body);
+  return box;
+}
+
 // Строка итогов дня под сотрудником.
 function dayLine(today, withWork) {
   const parts = [];
@@ -470,6 +536,8 @@ async function act(button, errorNode, request) {
     button.disabled = false;
   }
 }
+
+$("search").addEventListener("input", renderEmployees);
 
 $("add-form").addEventListener("submit", async (event) => {
   event.preventDefault();

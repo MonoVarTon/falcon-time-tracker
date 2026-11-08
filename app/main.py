@@ -94,7 +94,8 @@ def add_employee(body: EmployeeCreate, db: Session = Depends(get_checked_db)) ->
     """Добавить сотрудника."""
     employee = services.create_employee(db, body.name)
     empty_day = DaySummary(work_seconds=0, break_seconds=0, lunch_seconds=0)
-    return EmployeeOut(id=employee.id, name=employee.name, active_entry=None, today=empty_day)
+    return EmployeeOut(id=employee.id, name=employee.name, active_entry=None, today=empty_day,
+                       needs_attention=False, review_entry=None)
 
 
 @app.get("/api/employees", response_model=list[EmployeeOut])
@@ -115,11 +116,15 @@ def employees(
     result = []
     for employee in services.list_employees(db):
         running = services.get_running_entry(db, employee.id)
+        active = services.entry_out(running, now) if running else None
+        review = services.get_review_entry(db, employee.id)
         result.append(EmployeeOut(
             id=employee.id,
             name=employee.name,
-            active_entry=services.entry_out(running, now) if running else None,
+            active_entry=active,
             today=summaries[employee.id],
+            needs_attention=(active is not None and active.is_too_long) or review is not None,
+            review_entry=services.entry_out(review, now) if review else None,
         ))
     return result
 

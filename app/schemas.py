@@ -119,6 +119,10 @@ class EmployeeOut(BaseModel):
     name: str
     active_entry: EntryOut | None
     today: DaySummary
+    # Требует внимания руководителя: таймер идёт слишком долго или запись
+    # остановилась сама и ждёт уточнения времени (она — в review_entry).
+    needs_attention: bool
+    review_entry: EntryOut | None
 
 
 class EmployeeReport(BaseModel):

@@ -197,6 +197,15 @@ def extend_limit(db: Session, entry_id: int, approved_by: str, hours: int) -> Ti
     return entry
 
 
+def get_review_entry(db: Session, employee_id: int) -> TimeEntry | None:
+    """Самая ранняя запись сотрудника, остановленная автоматически и ещё не уточнённая."""
+    return db.scalars(
+        select(TimeEntry)
+        .where(TimeEntry.employee_id == employee_id, TimeEntry.auto_stopped.is_(True), TimeEntry.corrected.is_(False))
+        .order_by(TimeEntry.started_at)
+    ).first()
+
+
 def _get_entry(db: Session, entry_id: int) -> TimeEntry:
     entry = db.get(TimeEntry, entry_id)
     if entry is None:
